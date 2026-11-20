@@ -111,14 +111,250 @@ namespace WinOpt {
 '@
 }
 
-if (-not ('WinOpt.Native' -as [type])) {
+if (-not ('WinOpt.Collector' -as [type])) {
     Add-Type -Language CSharp -TypeDefinition @'
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
+using System.Threading;
+
 namespace WinOpt {
-    public static class Native {
+    public class ProcRow {
+        public string Name { get; set; }
+        public int Count { get; set; }
+        public long MB { get; set; }
+        public double Cpu { get; set; }
+        public string CpuText { get { return Cpu < 0.05 ? "0 %" : Cpu.ToString("0.0") + " %"; } }
+    }
+
+    public class MemInfo {
+        public long TotalMB;
+        public long AvailMB;
+        public long UsedMB;
+        public double Pct;
+    }
+
+    public class Snapshot {
+        public MemInfo Mem;
+        public double Cpu;          // -1 = not sampled yet
+        public string CpuSource;
+        public string PowerPlan;    // "guid|name"
+        public List<ProcRow> Procs;
+        public int ProcVersion;
+        public bool ProcApproximate;
+    }
+
+    // Collects all dashboard data on a thread-pool timer so the UI thread never blocks.
+    public static class Collector {
+        [StructLayout(LayoutKind.Sequential)]
+        private class MEMORYSTATUSEX {
+            public uint dwLength; public uint dwMemoryLoad;
+            public ulong ullTotalPhys; public ulong ullAvailPhys;
+            public ulong ullTotalPageFile; public ulong ullAvailPageFile;
+            public ulong ullTotalVirtual; public ulong ullAvailVirtual; public ulong ullAvailExtendedVirtual;
+            public MEMORYSTATUSEX() { dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX)); }
+        }
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GlobalMemoryStatusEx([In, Out] MEMORYSTATUSEX buf);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
+        [DllImport("powrprof.dll")]
+        private static extern uint PowerGetActiveScheme(IntPtr root, out IntPtr guid);
+        [DllImport("powrprof.dll")]
+        private static extern uint PowerReadFriendlyName(IntPtr root, IntPtr scheme, IntPtr sub, IntPtr setting, IntPtr buffer, ref uint size);
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr h);
         [DllImport("psapi.dll", SetLastError = true)]
-        public static extern bool EmptyWorkingSet(IntPtr hProcess);
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool EmptyWorkingSet(IntPtr h);
+
+        // ---------- memory (same source as Task Manager: In use = Total - Available) ----------
+        public static MemInfo ReadMemory() {
+            MEMORYSTATUSEX m = new MEMORYSTATUSEX();
+            if (!GlobalMemoryStatusEx(m)) return null;
+            MemInfo r = new MemInfo();
+            r.TotalMB = (long)(m.ullTotalPhys / 1048576UL);
+            r.AvailMB = (long)(m.ullAvailPhys / 1048576UL);
+            r.UsedMB  = r.TotalMB - r.AvailMB;
+            r.Pct     = r.TotalMB > 0 ? Math.Round(r.UsedMB * 100.0 / r.TotalMB, 1) : 0;
+            return r;
+        }
+
+        // ---------- active power plan (no powercfg.exe process spawn) ----------
+        public static string GetActivePlan() {
+            IntPtr p;
+            if (PowerGetActiveScheme(IntPtr.Zero, out p) != 0) return null;
+            try {
+                Guid g = (Guid)Marshal.PtrToStructure(p, typeof(Guid));
+                uint size = 0;
+                PowerReadFriendlyName(IntPtr.Zero, p, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, ref size);
+                string name = "";
+                if (size > 0) {
+                    IntPtr buf = Marshal.AllocHGlobal((int)size);
+                    try {
+                        if (PowerReadFriendlyName(IntPtr.Zero, p, IntPtr.Zero, IntPtr.Zero, buf, ref size) == 0)
+                            name = Marshal.PtrToStringUni(buf);
+                    } finally { Marshal.FreeHGlobal(buf); }
+                }
+                return g.ToString() + "|" + name;
+            } finally { LocalFree(p); }
+        }
+
+        // ---------- CPU ----------
+        // Task Manager (Win10 1903+/Win11) shows "% Processor Utility", which accounts for boost clocks.
+        // Fall back to GetSystemTimes deltas (= "% Processor Time") if that counter is unavailable.
+        private static PerformanceCounter utilCounter;
+        private static bool utilTried;
+        private static long lastIdle, lastKernel, lastUser;
+
+        private static double ReadCpu(out string source) {
+            if (!utilTried) {
+                utilTried = true;
+                try {
+                    utilCounter = new PerformanceCounter("Processor Information", "% Processor Utility", "_Total", true);
+                    utilCounter.NextValue();
+                    source = "Processor Utility";
+                    return -1;
+                } catch { utilCounter = null; }
+            }
+            if (utilCounter != null) {
+                try {
+                    source = "Processor Utility";
+                    return Math.Round(Math.Min(100.0, Math.Max(0.0, utilCounter.NextValue())), 0);
+                } catch { utilCounter = null; }
+            }
+            source = "Processor Time";
+            long idle, kernel, user;
+            if (!GetSystemTimes(out idle, out kernel, out user)) return -1;
+            bool first = lastKernel == 0;
+            long di = idle - lastIdle, dk = kernel - lastKernel, du = user - lastUser;
+            lastIdle = idle; lastKernel = kernel; lastUser = user;
+            if (first) return -1;
+            long total = dk + du;           // kernel time includes idle time
+            if (total <= 0) return 0;
+            return Math.Round(Math.Max(0.0, Math.Min(100.0, (total - di) * 100.0 / total)), 0);
+        }
+
+        // ---------- processes ----------
+        // Memory = "Working Set - Private", the same figure as Task Manager's Memory column.
+        // (Process.WorkingSet64 includes shared DLL pages and over-counts multi-process apps heavily.)
+        private static Dictionary<string, CounterSample> prevCpu = new Dictionary<string, CounterSample>();
+        private static readonly Regex instSuffix = new Regex(@"#\d+$");
+
+        private static List<ProcRow> ReadProcs(out bool approximate) {
+            approximate = false;
+            Dictionary<string, ProcRow> groups = new Dictionary<string, ProcRow>(StringComparer.OrdinalIgnoreCase);
+            try {
+                InstanceDataCollectionCollection all = new PerformanceCounterCategory("Process").ReadCategory();
+                InstanceDataCollection ws  = all["Working Set - Private"];
+                InstanceDataCollection ids = all["ID Process"];
+                InstanceDataCollection cpu = all["% Processor Time"];
+                if (ws == null) throw new InvalidOperationException("Working Set - Private counter missing");
+                Dictionary<string, CounterSample> next = new Dictionary<string, CounterSample>();
+                int cores = Math.Max(1, Environment.ProcessorCount);
+                foreach (InstanceData d in ws.Values) {
+                    string inst = d.InstanceName;
+                    if (inst == "_Total" || inst == "Idle") continue;
+                    string baseName = instSuffix.Replace(inst, "");
+                    long pid = (ids != null && ids.Contains(inst)) ? ids[inst].RawValue : -1;
+                    double c = 0;
+                    if (cpu != null && cpu.Contains(inst)) {
+                        CounterSample cur = cpu[inst].Sample;
+                        string key = pid.ToString() + ":" + baseName;
+                        CounterSample old;
+                        if (prevCpu.TryGetValue(key, out old)) c = CounterSample.Calculate(old, cur) / cores;
+                        next[key] = cur;
+                    }
+                    ProcRow row;
+                    if (!groups.TryGetValue(baseName, out row)) { row = new ProcRow(); row.Name = baseName; groups[baseName] = row; }
+                    row.Count++;
+                    row.MB += d.RawValue;
+                    if (c > 0) row.Cpu += c;
+                }
+                prevCpu = next;
+            } catch {
+                approximate = true;
+                groups.Clear();
+                foreach (Process p in Process.GetProcesses()) {
+                    try {
+                        ProcRow row;
+                        if (!groups.TryGetValue(p.ProcessName, out row)) { row = new ProcRow(); row.Name = p.ProcessName; groups[p.ProcessName] = row; }
+                        row.Count++;
+                        row.MB += p.WorkingSet64;
+                    } catch { } finally { p.Dispose(); }
+                }
+            }
+            List<ProcRow> list = new List<ProcRow>(groups.Values);
+            foreach (ProcRow r in list) { r.MB = r.MB / 1048576; if (r.Cpu > 100) r.Cpu = 100; }
+            list.Sort(delegate(ProcRow a, ProcRow b) { return b.MB.CompareTo(a.MB); });
+            if (list.Count > 25) list.RemoveRange(25, list.Count - 25);
+            return list;
+        }
+
+        public static int TrimAll() {
+            int n = 0;
+            foreach (Process p in Process.GetProcesses()) {
+                try { if (EmptyWorkingSet(p.Handle)) n++; } catch { } finally { p.Dispose(); }
+            }
+            return n;
+        }
+
+        // ---------- background loop ----------
+        private static Timer timer;
+        private static int busy;
+        private static int tick;
+        private static volatile Snapshot current;
+        private static volatile bool procRequest = true;
+        private static volatile bool planRequest = true;
+        private static int procVersion;
+        private static List<ProcRow> lastProcs = new List<ProcRow>();
+        private static bool lastApprox;
+        private static string plan;
+
+        public static volatile bool WantProcs = true;
+        public static Snapshot Current { get { return current; } }
+        public static void RequestProcs() { procRequest = true; }
+        public static void RequestPlan() { planRequest = true; }
+
+        public static void Start() {
+            if (timer == null) timer = new Timer(Tick, null, 0, 1000);
+        }
+        public static void Stop() {
+            if (timer != null) { timer.Dispose(); timer = null; }
+        }
+
+        private static void Tick(object state) {
+            if (Interlocked.Exchange(ref busy, 1) == 1) return;   // previous sample still running
+            try {
+                Snapshot s = new Snapshot();
+                s.Mem = ReadMemory();
+                string src;
+                s.Cpu = ReadCpu(out src);
+                s.CpuSource = src;
+                if (plan == null || planRequest || tick % 15 == 0) {
+                    planRequest = false;
+                    try { plan = GetActivePlan(); } catch { }
+                }
+                s.PowerPlan = plan;
+                if (procRequest || (WantProcs && tick % 3 == 0)) {
+                    procRequest = false;
+                    bool approx;
+                    lastProcs = ReadProcs(out approx);
+                    lastApprox = approx;
+                    procVersion++;
+                }
+                s.Procs = lastProcs;
+                s.ProcVersion = procVersion;
+                s.ProcApproximate = lastApprox;
+                current = s;
+                tick++;
+            } catch { }
+            finally { Interlocked.Exchange(ref busy, 0); }
+        }
     }
 }
 '@
@@ -194,10 +430,28 @@ function Test-RegEquals($State, $Target) {
     return "$($State.Value)" -eq "$($Target.Value)"
 }
 
+# Task Scheduler COM API: much faster than the ScheduledTasks cmdlets (no CIM/module load).
+$script:TaskSvc = $null
+function Get-TaskObject([string]$TaskPath, [string]$TaskName) {
+    if (-not $script:TaskSvc) {
+        $script:TaskSvc = New-Object -ComObject 'Schedule.Service'
+        $script:TaskSvc.Connect()
+    }
+    $folder = $TaskPath.TrimEnd('\')
+    if (-not $folder) { $folder = '\' }
+    try { return $script:TaskSvc.GetFolder($folder).GetTask($TaskName) } catch { return $null }
+}
+
 function Get-TaskState([string]$TaskPath, [string]$TaskName) {
-    $t = Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction SilentlyContinue
+    $t = Get-TaskObject $TaskPath $TaskName
     if (-not $t) { return $null }
-    return $t.State.ToString()
+    if ($t.Enabled) { 'Enabled' } else { 'Disabled' }
+}
+
+function Set-TaskEnabled([string]$TaskPath, [string]$TaskName, [bool]$Enabled) {
+    $t = Get-TaskObject $TaskPath $TaskName
+    if (-not $t) { throw "Task $TaskPath$TaskName not found" }
+    $t.Enabled = $Enabled
 }
 
 $PowerSchemes = @{
@@ -207,9 +461,11 @@ $PowerSchemes = @{
 }
 
 function Get-ActiveScheme {
-    $o = powercfg /getactivescheme 2>$null
-    if ("$o" -match '([0-9a-fA-F-]{36})\s*\((.+)\)') { return @{ Guid = $Matches[1]; Name = $Matches[2] } }
-    return $null
+    # Native PowerGetActiveScheme - no powercfg.exe process per call.
+    $v = [WinOpt.Collector]::GetActivePlan()
+    if (-not $v) { return $null }
+    $parts = $v -split '\|', 2
+    return @{ Guid = $parts[0]; Name = $parts[1] }
 }
 
 function Get-AllSchemes {
@@ -334,7 +590,7 @@ function Invoke-Action($a) {
             $st = Get-TaskState $a.TaskPath $a.TaskName
             if (-not $st) { Write-Log "  skip task $($a.TaskName) (not present)"; return $null }
             if ($st -eq 'Disabled') { Write-Log "  task $($a.TaskName) already disabled"; return $null }
-            Disable-ScheduledTask -TaskPath $a.TaskPath -TaskName $a.TaskName -ErrorAction Stop | Out-Null
+            Set-TaskEnabled $a.TaskPath $a.TaskName $false
             Write-Log "  task $($a.TaskPath)$($a.TaskName) disabled" 'OK'
             return [ordered]@{ Type = 'Task'; TaskPath = $a.TaskPath; TaskName = $a.TaskName }
         }
@@ -366,7 +622,7 @@ function Restore-Entry($e) {
             }
         }
         'Task' {
-            Enable-ScheduledTask -TaskPath $e.TaskPath -TaskName $e.TaskName -ErrorAction Stop | Out-Null
+            Set-TaskEnabled $e.TaskPath $e.TaskName $true
             Write-Log "  task $($e.TaskPath)$($e.TaskName) re-enabled" 'OK'
         }
         'PowerPlan' {
@@ -411,7 +667,7 @@ function New-Tweak {
 }
 
 function Get-TweakCatalog {
-    $totalKB = [int64]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1KB)
+    $totalKB = [int64]([WinOpt.Collector]::ReadMemory().TotalMB * 1024)
 
     # Keep any existing global DirectX flags (e.g. Auto HDR / VRR) and only add SwapEffectUpgradeEnable=1.
     $dxPath = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
@@ -627,33 +883,28 @@ function Get-StartupTweaks {
 # 7. System stats
 # ---------------------------------------------------------------------------
 function Get-MemStats {
-    $os = Get-CimInstance Win32_OperatingSystem
-    $totalMB = [math]::Round($os.TotalVisibleMemorySize / 1KB)
-    $freeMB  = [math]::Round($os.FreePhysicalMemory / 1KB)
-    @{ TotalMB = $totalMB; UsedMB = $totalMB - $freeMB; FreeMB = $freeMB; Pct = [math]::Round((($totalMB - $freeMB) / $totalMB) * 100, 1) }
+    # GlobalMemoryStatusEx: identical to Task Manager ("In use" = total - available).
+    $m = [WinOpt.Collector]::ReadMemory()
+    @{ TotalMB = $m.TotalMB; UsedMB = $m.UsedMB; FreeMB = $m.AvailMB; Pct = $m.Pct }
 }
 
-function Get-CpuLoad {
-    $v = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
-    if ($null -eq $v) { 0 } else { [math]::Round($v) }
-}
+function Invoke-TrimWorkingSets { [WinOpt.Collector]::TrimAll() }
 
-function Get-TopProcesses {
-    Get-Process | Group-Object ProcessName | ForEach-Object {
-        [pscustomobject]@{
-            Name  = $_.Name
-            Count = $_.Count
-            MB    = [math]::Round((($_.Group | Measure-Object WorkingSet64 -Sum).Sum) / 1MB)
-        }
-    } | Sort-Object MB -Descending | Select-Object -First 15
-}
-
-function Invoke-TrimWorkingSets {
-    $n = 0
-    foreach ($p in Get-Process) {
-        try { if ([WinOpt.Native]::EmptyWorkingSet($p.Handle)) { $n++ } } catch {}
+function Get-SystemSummary {
+    # Registry reads instead of WMI: instant.
+    $cv    = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue
+    $build = [int]$cv.CurrentBuild
+    # ProductName still says "Windows 10" on Windows 11, so derive the major version from the build number.
+    $name  = if ($build -ge 22000) { $cv.ProductName -replace 'Windows 10', 'Windows 11' } else { $cv.ProductName }
+    $ver   = if ($cv.DisplayVersion) { " $($cv.DisplayVersion)" } else { '' }
+    $cpu   = (Get-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0' -ErrorAction SilentlyContinue).ProcessorNameString
+    $gpus  = @()
+    $cls   = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
+    Get-ChildItem $cls -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d{4}$' } | ForEach-Object {
+        $d = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DriverDesc
+        if ($d -and $gpus -notcontains $d -and $d -notmatch 'Basic Display|Basic Render|Remote Display|Virtual') { $gpus += $d }
     }
-    return $n
+    @{ Os = "$name$ver (build $build)"; Cpu = "$cpu".Trim(); Gpus = ($gpus -join ', ') }
 }
 
 # ---------------------------------------------------------------------------
@@ -819,14 +1070,20 @@ function Invoke-TrimWorkingSets {
             <DockPanel>
               <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
                 <Button x:Name="BtnRefreshProc" DockPanel.Dock="Right" Content="Refresh" Style="{StaticResource Btn}" Margin="0"/>
-                <TextBlock Text="Top processes by memory (grouped)" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <StackPanel VerticalAlignment="Center">
+                  <TextBlock Text="Top processes by memory (grouped)" FontSize="15" FontWeight="SemiBold"/>
+                  <TextBlock x:Name="ProcNote" Foreground="#6E7681" FontSize="11"
+                             Text="Memory = private working set, the same figure as Task Manager's Memory column."/>
+                </StackPanel>
               </DockPanel>
-              <ListView x:Name="ProcList" Background="Transparent" BorderThickness="0" Foreground="#E6EDF3">
+              <ListView x:Name="ProcList" Background="Transparent" BorderThickness="0" Foreground="#E6EDF3"
+                        VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
                 <ListView.View>
                   <GridView>
-                    <GridViewColumn Header="Process" Width="320" DisplayMemberBinding="{Binding Name}"/>
-                    <GridViewColumn Header="Instances" Width="100" DisplayMemberBinding="{Binding Count}"/>
-                    <GridViewColumn Header="Working set (MB)" Width="160" DisplayMemberBinding="{Binding MB}"/>
+                    <GridViewColumn Header="Process" Width="300" DisplayMemberBinding="{Binding Name}"/>
+                    <GridViewColumn Header="Instances" Width="90" DisplayMemberBinding="{Binding Count}"/>
+                    <GridViewColumn Header="Memory (MB)" Width="130" DisplayMemberBinding="{Binding MB}"/>
+                    <GridViewColumn Header="CPU" Width="90" DisplayMemberBinding="{Binding CpuText}"/>
                   </GridView>
                 </ListView.View>
               </ListView>
@@ -940,7 +1197,7 @@ $ui = @{}
 foreach ($n in 'Tabs','SysInfo','RamText','RamBar','RamSub','CpuText','CpuBar','PlanText','DeltaText','DeltaSub','ProcList','BtnRefreshProc',
                'MemList','BtnMemRec','BtnMemNone','BtnTrim','StartList','BtnStartNone','BtnStartReload',
                'CpuList','BtnCpuRec','BtnCpuNone','GpuList','GpuInfo','BtnGpuRec','BtnGpuNone',
-               'BackupList','BtnRestore','BtnRestorePoint','BtnOpenSysRestore','BtnOpenFolder','LogBox','SelCount','BtnApply') {
+               'BackupList','ProcNote','BtnRestore','BtnRestorePoint','BtnOpenSysRestore','BtnOpenFolder','LogBox','SelCount','BtnApply') {
     $ui[$n] = $window.FindName($n)
 }
 $script:LogBox = $ui.LogBox
@@ -1005,25 +1262,39 @@ function Set-Selection($category, [bool]$recommendedOnly, [bool]$none) {
     }
 }
 
+# The UI thread only reads the latest snapshot produced by the background collector - it never waits on WMI.
+$script:LastProcVersion = -1
 function Update-Stats {
-    try {
-        $m = Get-MemStats
+    $snap = [WinOpt.Collector]::Current
+    if (-not $snap) { return }
+    $m = $snap.Mem
+    if ($m) {
         $ui.RamText.Text = '{0:N1} / {1:N1} GB' -f ($m.UsedMB / 1024), ($m.TotalMB / 1024)
         $ui.RamBar.Value = $m.Pct
-        $ui.RamSub.Text  = "$($m.Pct)% used  -  $([math]::Round($m.FreeMB/1024,1)) GB available"
-        $c = Get-CpuLoad
-        $ui.CpuText.Text = "$c %"
-        $ui.CpuBar.Value = $c
-        $plan = Get-ActiveScheme
-        if ($plan) { $ui.PlanText.Text = "Power plan: $($plan.Name)" }
+        $ui.RamSub.Text  = '{0}% in use  -  {1:N1} GB available' -f $m.Pct, ($m.AvailMB / 1024)
         if ($null -ne $script:BaselineMB) {
             $d = $script:BaselineMB - $m.UsedMB
             $ui.DeltaText.Text = if ($d -ge 0) { "-$d MB" } else { "+$([math]::Abs($d)) MB" }
         }
-    } catch {}
+    }
+    if ($snap.Cpu -ge 0) {
+        $ui.CpuText.Text = '{0:N0} %' -f $snap.Cpu
+        $ui.CpuBar.Value = $snap.Cpu
+    }
+    if ($snap.PowerPlan) { $ui.PlanText.Text = 'Power plan: ' + ($snap.PowerPlan -split '\|', 2)[1] }
+
+    $onDashboard = $ui.Tabs.SelectedIndex -eq 0
+    [WinOpt.Collector]::WantProcs = $onDashboard
+    if ($onDashboard -and $snap.ProcVersion -ne $script:LastProcVersion) {
+        $script:LastProcVersion = $snap.ProcVersion
+        $ui.ProcList.ItemsSource = $snap.Procs
+        if ($snap.ProcApproximate) {
+            $ui.ProcNote.Text = 'Performance counters unavailable - showing total working set (includes shared memory, so it over-counts).'
+        }
+    }
 }
 
-function Update-Processes { try { $ui.ProcList.ItemsSource = @(Get-TopProcesses) } catch {} }
+function Update-Processes { [WinOpt.Collector]::RequestProcs() }
 
 # ---------- Preview / confirm dialog ----------
 function Show-Preview($selected) {
@@ -1131,6 +1402,8 @@ function Invoke-Apply {
         foreach ($t in $script:Catalog) { Update-TweakStatus $t }
         Load-Startup
         Load-Backups
+        [WinOpt.Collector]::RequestPlan()
+        [WinOpt.Collector]::RequestProcs()
         Start-Sleep -Milliseconds 1500
         Update-Stats
         $ui.DeltaSub.Text = 'Measured right after applying. Most savings (services, startup apps, svchost grouping) only fully show after a reboot.'
@@ -1180,10 +1453,10 @@ $ui.BtnRefreshProc.add_Click({ Update-Processes })
 $ui.BtnTrim.add_Click({
     $before = (Get-MemStats).UsedMB
     $n = Invoke-TrimWorkingSets
-    Start-Sleep -Milliseconds 800
+    Start-Sleep -Milliseconds 500
     $after = (Get-MemStats).UsedMB
     Write-Log "Trimmed $n processes: in-use RAM $before MB -> $after MB. This is temporary; Windows pages memory back in as apps need it." 'OK'
-    Update-Stats; Update-Processes
+    Update-Processes
 })
 $ui.BtnRestore.add_Click({ Invoke-Restore })
 $ui.BtnRestorePoint.add_Click({
@@ -1193,32 +1466,33 @@ $ui.BtnRestorePoint.add_Click({
 $ui.BtnOpenSysRestore.add_Click({ Start-Process "$env:SystemRoot\System32\rstrui.exe" })
 $ui.BtnOpenFolder.add_Click({ Start-Process explorer.exe $BackupDir })
 
+# UI refresh: 1 s, and each tick only copies already-collected numbers into labels (microseconds).
 $timer = New-Object System.Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromSeconds(3)
-$script:Tick = 0
-$timer.add_Tick({
-    Update-Stats
-    $script:Tick++
-    if ($script:Tick % 4 -eq 0 -and $ui.Tabs.SelectedIndex -eq 0) { Update-Processes }
-})
+$timer.Interval = [TimeSpan]::FromSeconds(1)
+$timer.add_Tick({ try { Update-Stats } catch {} })
 
 $window.add_Loaded({
-    Write-Log "WinOptimizer started. Log: $LogFile"
-    try {
-        $os  = Get-CimInstance Win32_OperatingSystem
-        $cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim()
-        $ui.SysInfo.Text = "$($os.Caption) (build $($os.BuildNumber))  -  $cpu"
-        $gpus = (Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) -join ', '
-        $ui.GpuInfo.Text = "Detected: $gpus.  These settings reduce background GPU work and latency. They do not overclock or change driver settings - for that use your GPU vendor's control panel."
-    } catch {}
-    Load-Catalog
-    Load-Startup
-    Load-Backups
-    Update-SelCount
-    Update-Stats
-    Update-Processes
+    $ui.SysInfo.Text = 'Loading...'
+    [WinOpt.Collector]::Start()
     $timer.Start()
+    # Let the window paint first, then do the one-off registry/service scan.
+    [void]$window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ContextIdle, [Action]{
+        Write-Log "WinOptimizer started. Log: $LogFile"
+        try {
+            $info = Get-SystemSummary
+            $ui.SysInfo.Text = "$($info.Os)  -  $($info.Cpu)"
+            $ui.GpuInfo.Text = "Detected: $($info.Gpus).  These settings reduce background GPU work and latency. They do not overclock or change driver settings - for that use your GPU vendor's control panel."
+        } catch {}
+        try {
+            Load-Catalog
+            Load-Startup
+            Load-Backups
+            Update-SelCount
+        } catch {
+            Write-Log "Startup scan failed: $($_.Exception.Message)" 'ERR'
+        }
+    })
 })
-$window.add_Closed({ $timer.Stop() })
+$window.add_Closed({ $timer.Stop(); [WinOpt.Collector]::Stop() })
 
 [void]$window.ShowDialog()
