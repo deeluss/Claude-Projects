@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+﻿﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     WinOptimizer - a safe, reversible Windows 10/11 RAM / CPU / GPU tuner with a GUI.
@@ -82,6 +82,7 @@ namespace WinOpt {
         public string Description { get; set; }
         public string Tradeoff { get; set; }
         public string Risk { get; set; }
+        public string Group { get; set; }
         public bool Recommended { get; set; }
         public object Actions { get; set; }
 
@@ -95,15 +96,21 @@ namespace WinOpt {
         public string Status { get { return _status; } set { _status = value; N("Status"); N("StatusColor"); } }
 
         public string StatusColor { get {
-            if (_status == "Applied") return "#3FB950";
-            if (_status == "Not present") return "#6E7681";
-            if (_status == "Partially applied") return "#D29922";
-            return "#8B949E"; } }
+            if (_status == "Applied" || _status == "Already disabled") return "#34D399";
+            if (_status == "Not present") return "#5C667A";
+            if (_status == "Partially applied") return "#FBBF24";
+            if (_status == "Install another browser first") return "#F87171";
+            return "#8C96A8"; } }
 
         public string RiskColor { get {
-            if (Risk == "Safe") return "#3FB950";
-            if (Risk == "Moderate") return "#D29922";
-            return "#F85149"; } }
+            if (Risk == "Safe") return "#34D399";
+            if (Risk == "Moderate") return "#FBBF24";
+            return "#F87171"; } }
+
+        public string RiskBg { get {
+            if (Risk == "Safe") return "#1F34D399";
+            if (Risk == "Moderate") return "#1FFBBF24";
+            return "#26F87171"; } }
 
         public string TradeoffText { get { return "Trade-off: " + Tradeoff; } }
     }
@@ -528,6 +535,9 @@ function Get-ActionDescription($a) {
             $cur = Get-ActiveScheme
             return "Power plan: $($cur.Name)  ->  Ultimate Performance (or High performance if unavailable)"
         }
+        'Appx'     { return 'UNINSTALL for all users (and stop it reinstalling for new accounts): ' + (@($a.Found) -join ', ') }
+        'Edge'     { return 'UNINSTALL Microsoft Edge system-wide and block Edge Update from reinstalling it. Edge WebView2 Runtime is kept.' }
+        'OneDrive' { return 'UNINSTALL the OneDrive sync client. Files in your OneDrive cloud account are not deleted.' }
     }
 }
 
@@ -629,24 +639,6 @@ function Restore-Entry($e) {
             powercfg /setactive $e.Previous | Out-Null
             Write-Log "  power plan restored to $($e.PreviousName)" 'OK'
         }
-    }
-}
-
-function New-SafetyRestorePoint {
-    $k = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
-    $prev = Get-RegState $k 'SystemRestorePointCreationFrequency'
-    try {
-        try { Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop } catch {}
-        # Windows silently skips restore points if one was made in the last 24h; lift that for this one call.
-        Set-RegValue $k 'SystemRestorePointCreationFrequency' 0 'DWord'
-        Checkpoint-Computer -Description "WinOptimizer - before changes $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
-        return $true
-    } catch {
-        Write-Log "Restore point failed: $($_.Exception.Message)" 'ERR'
-        return $false
-    } finally {
-        if ($prev.Existed) { Set-RegValue $k 'SystemRestorePointCreationFrequency' $prev.Value $prev.Kind }
-        else { Remove-ItemProperty -Path $k -Name 'SystemRestorePointCreationFrequency' -ErrorAction SilentlyContinue }
     }
 }
 
@@ -908,71 +900,500 @@ function Get-SystemSummary {
 }
 
 # ---------------------------------------------------------------------------
+# 7b. Bloatware - a curated allow-list of removable apps (never a wildcard sweep)
+# ---------------------------------------------------------------------------
+# Hard guard: these are NEVER removed, even if a pattern below were to match them.
+# Store, App Installer/winget, frameworks/runtimes, security, sign-in, shell hosts, codecs, core inbox tools.
+$ProtectedAppx = '^(Microsoft\.WindowsStore|Microsoft\.StorePurchaseApp|Microsoft\.DesktopAppInstaller|Microsoft\.VCLibs\..*|Microsoft\.UI\.Xaml\..*|Microsoft\.NET\..*|Microsoft\.WindowsAppRuntime\..*|Microsoft\.Services\.Store\.Engagement|Microsoft\.SecHealthUI|Microsoft\.XboxIdentityProvider|Microsoft\.Xbox\.TCUI|Microsoft\.AAD\.BrokerPlugin|Microsoft\.AccountsControl|Microsoft\.Windows\..*Host|Microsoft\.WindowsTerminal|Microsoft\.WindowsCalculator|Microsoft\.WindowsNotepad|Microsoft\.Windows\.Photos|Microsoft\.ScreenSketch|Microsoft\.Paint|Microsoft\..*Extension.*|Microsoft\.MicrosoftEdge.*|MicrosoftWindows\.Client\..*|Microsoft\.LanguageExperiencePack.*|windows\..*)$'
+
+$G_MS    = 'Microsoft apps'
+$G_XBOX  = 'Xbox & gaming'
+$G_3P    = 'Preinstalled third-party apps'
+$G_CORE  = 'Microsoft Edge & OneDrive'
+$StoreBack = 'Reinstall any time from the Microsoft Store (Backup & Restore gives you a direct link).'
+
+function B($Group, $Id, $Name, $Risk, [bool]$Rec, [string[]]$Patterns, $Desc, $Trade) {
+    @{ Group = $Group; Id = $Id; Name = $Name; Risk = $Risk; Rec = $Rec; Patterns = $Patterns; Desc = $Desc; Trade = $Trade }
+}
+
+$BloatDefs = @(
+    (B $G_MS 'news'        'News & Weather'                 'Safe' $true  @('Microsoft.BingNews','Microsoft.BingWeather') 'Preinstalled MSN news and weather apps.' $StoreBack),
+    (B $G_MS 'bingsearch'  'Bing Search'                    'Safe' $true  @('Microsoft.BingSearch') 'Standalone Bing search app.' $StoreBack),
+    (B $G_MS 'tips'        'Tips & Get Help'                'Safe' $true  @('Microsoft.Getstarted','Microsoft.GetHelp') 'Windows tips and the Get Help support app.' 'A few built-in troubleshooter links will open the Microsoft support website instead.'),
+    (B $G_MS 'solitaire'   'Microsoft Solitaire Collection' 'Safe' $true  @('Microsoft.MicrosoftSolitaireCollection') 'Ad-supported card games.' $StoreBack),
+    (B $G_MS 'officehub'   'Microsoft 365 (Office) hub'     'Safe' $true  @('Microsoft.MicrosoftOfficeHub') 'The Office launcher/advert app only. Installed Word, Excel, etc. are NOT affected.' $StoreBack),
+    (B $G_MS 'clipchamp'   'Clipchamp'                      'Safe' $true  @('Clipchamp.Clipchamp') 'Web-based video editor.' $StoreBack),
+    (B $G_MS 'todo'        'Microsoft To Do'                'Safe' $true  @('Microsoft.Todos') 'Task list app.' ('Your lists stay in your Microsoft account. ' + $StoreBack)),
+    (B $G_MS 'feedback'    'Feedback Hub'                   'Safe' $true  @('Microsoft.WindowsFeedbackHub') 'App for sending feedback to Microsoft.' $StoreBack),
+    (B $G_MS 'maps'        'Windows Maps'                   'Safe' $true  @('Microsoft.WindowsMaps') 'Offline maps app.' $StoreBack),
+    (B $G_MS 'people'      'People'                         'Safe' $true  @('Microsoft.People') 'Legacy contacts app.' $StoreBack),
+    (B $G_MS 'skype'       'Skype'                          'Safe' $true  @('Microsoft.SkypeApp') 'Skype (retired by Microsoft in 2025).' $StoreBack),
+    (B $G_MS 'movies'      'Movies & TV'                    'Safe' $true  @('Microsoft.ZuneVideo') 'Legacy video store/player.' 'Videos still play in Media Player or any other player.'),
+    (B $G_MS 'automate'    'Power Automate'                 'Safe' $true  @('Microsoft.PowerAutomateDesktop') 'Desktop automation tool.' $StoreBack),
+    (B $G_MS 'devhome'     'Dev Home'                       'Safe' $true  @('Microsoft.Windows.DevHome') 'Developer dashboard (discontinued by Microsoft).' $StoreBack),
+    (B $G_MS 'threed'      '3D apps (Paint 3D, 3D Viewer, Mixed Reality)' 'Safe' $true @('Microsoft.MSPaint','Microsoft.Microsoft3DViewer','Microsoft.MixedReality.Portal','Microsoft.Print3D') 'Legacy 3D apps. Classic Paint is not affected.' $StoreBack),
+    (B $G_MS 'legacy'      'Legacy promo apps'              'Safe' $true  @('Microsoft.Wallet','Microsoft.Messaging','Microsoft.OneConnect') 'Wallet, Messaging and Mobile Plans leftovers.' $StoreBack),
+    (B $G_MS 'cortana'     'Cortana'                        'Safe' $true  @('Microsoft.549981C3F5F10') 'Discontinued voice assistant.' $StoreBack),
+    (B $G_MS 'copilot'     'Copilot app'                    'Safe' $true  @('Microsoft.Copilot') 'The Copilot AI app.' $StoreBack),
+    (B $G_MS 'family'      'Microsoft Family Safety'        'Safe' $true  @('MicrosoftCorporationII.MicrosoftFamily') 'Parental-controls companion app.' ('Family settings on your Microsoft account are not changed. ' + $StoreBack)),
+    (B $G_MS 'teams'       'Microsoft Teams'                'Moderate' $false @('MicrosoftTeams','MSTeams') 'Teams chat app (personal and work/school).' ('Keep it if you use Teams for work or school. ' + $StoreBack)),
+    (B $G_MS 'mail'        'Mail, Calendar & new Outlook'   'Moderate' $false @('microsoft.windowscommunicationsapps','Microsoft.OutlookForWindows') 'Built-in email and calendar apps.' ('You will need another mail client or webmail. ' + $StoreBack)),
+    (B $G_MS 'media'       'Media Player'                   'Moderate' $false @('Microsoft.ZuneMusic') 'The default music/video player on Windows 11 (Groove Music on Windows 10).' 'Install another player (e.g. VLC) first, or media files will have nothing to open them.'),
+    (B $G_MS 'phonelink'   'Phone Link'                     'Moderate' $false @('Microsoft.YourPhone','MicrosoftWindows.CrossDevice') 'Connects an Android/iPhone to the PC.' ('Phone notifications, texts and photos on the PC stop working. ' + $StoreBack)),
+    (B $G_MS 'quickassist' 'Quick Assist'                   'Moderate' $false @('MicrosoftCorporationII.QuickAssist') 'Remote-help tool.' ('Nobody can give you remote help through Quick Assist (also a common scam tool). ' + $StoreBack)),
+
+    (B $G_XBOX 'xboxapp'   'Xbox app'                       'Moderate' $false @('Microsoft.GamingApp','Microsoft.XboxApp') 'The Xbox PC app.' 'Required for PC Game Pass and installing Xbox PC games. Xbox sign-in for games is kept.'),
+    (B $G_XBOX 'gamebar'   'Xbox Game Bar'                  'Moderate' $false @('Microsoft.XboxGamingOverlay','Microsoft.XboxGameOverlay','Microsoft.XboxSpeechToTextOverlay') 'Win+G overlay, game capture and performance widgets.' ('Pressing the Xbox button on a controller may show a "you will need a new app" prompt. ' + $StoreBack)),
+
+    (B $G_3P 'kinggames'   'Candy Crush & other King games' 'Safe' $true  @('king.com.*') 'Preinstalled ad-supported games.' ('Game progress is tied to your King account. ' + $StoreBack)),
+    (B $G_3P 'spotify'     'Spotify'                        'Safe' $false @('SpotifyAB.SpotifyMusic') 'Spotify Store app (often preinstalled).' ('Your account and playlists are unaffected. ' + $StoreBack)),
+    (B $G_3P 'disney'      'Disney+'                        'Safe' $false @('Disney.37853FA22FAF4') 'Streaming app.' $StoreBack),
+    (B $G_3P 'netflix'     'Netflix'                        'Safe' $false @('*Netflix*') 'Streaming app.' $StoreBack),
+    (B $G_3P 'prime'       'Prime Video'                    'Safe' $false @('AmazonVideo.PrimeVideo') 'Streaming app.' $StoreBack),
+    (B $G_3P 'tiktok'      'TikTok'                         'Safe' $false @('*TikTok*') 'Social app.' $StoreBack),
+    (B $G_3P 'instagram'   'Instagram'                      'Safe' $false @('*Instagram*') 'Social app.' $StoreBack),
+    (B $G_3P 'facebook'    'Facebook'                       'Safe' $false @('Facebook.*') 'Social app.' $StoreBack),
+    (B $G_3P 'linkedin'    'LinkedIn'                       'Safe' $false @('*LinkedIn*') 'Social app.' $StoreBack)
+)
+
+function Get-OtherBrowsers {
+    $names = @()
+    foreach ($k in 'HKLM:\SOFTWARE\Clients\StartMenuInternet', 'HKCU:\SOFTWARE\Clients\StartMenuInternet', 'HKLM:\SOFTWARE\WOW6432Node\Clients\StartMenuInternet') {
+        if (-not (Test-Path $k)) { continue }
+        Get-ChildItem $k -ErrorAction SilentlyContinue | ForEach-Object {
+            $n = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).'(default)'
+            if (-not $n) { $n = $_.PSChildName }
+            if ($n -notmatch 'Edge|Internet Explorer|IEXPLORE') { $names += $n }
+        }
+    }
+    @($names | Sort-Object -Unique)
+}
+
+function Get-OneDriveExe {
+    foreach ($p in "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe", "$env:ProgramFiles\Microsoft OneDrive\OneDrive.exe", "${env:ProgramFiles(x86)}\Microsoft OneDrive\OneDrive.exe") {
+        if (Test-Path $p) { return $p }
+    }
+    return $null
+}
+
+$EdgeExe = Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'
+
+function Get-BloatTweaks($Installed, $Provisioned) {
+    $Installed   = @($Installed)
+    $names = @((@($Installed) + @($Provisioned)) | Where-Object { $_ -and $_ -notmatch $ProtectedAppx } | Sort-Object -Unique)
+    foreach ($d in $BloatDefs) {
+        $found = @($names | Where-Object { $n = $_; @($d.Patterns | Where-Object { $n -like $_ }).Count -gt 0 })
+        if (-not $found.Count) { continue }
+        $inst = @($found | Where-Object { $Installed -contains $_ })
+        $t = New-Tweak $d.Id 'Bloat' $d.Name $d.Risk $d.Rec $d.Desc $d.Trade @(@{ Type = 'Appx'; Patterns = $d.Patterns; Found = $found })
+        $t.Group = $d.Group
+        $t.Status = if ($inst.Count) { 'Installed' } else { 'Staged for new users' }
+        $t
+    }
+
+    if (Test-Path $EdgeExe) {
+        $others = @(Get-OtherBrowsers)
+        $t = New-Tweak 'edge' 'Bloat' 'Microsoft Edge browser' 'Advanced' $false `
+            'Uninstalls the Edge browser for all users and blocks Edge Update from silently reinstalling it. The Edge WebView2 Runtime is deliberately kept - Widgets, Teams, Outlook, many game launchers and other apps need it to work.' `
+            'Microsoft only officially allows this in the EU/EEA; elsewhere the same workaround other open-source debloat tools use is applied, and some builds still refuse (you will be told). A major Windows feature update can bring Edge back. Reinstall any time from microsoft.com/edge.' `
+            @(@{ Type = 'Edge' })
+        $t.Group = $G_CORE
+        if ($others.Count) {
+            $t.Status = 'Installed'
+            $t.Description += "  Other browser found: $($others -join ', ')."
+        } else {
+            $t.Status = 'Install another browser first'
+            $t.IsAvailable = $false
+        }
+        $t
+    }
+
+    if (Get-OneDriveExe) {
+        $t = New-Tweak 'onedrive' 'Bloat' 'OneDrive' 'Moderate' $false `
+            'Uninstalls the OneDrive sync client, which runs at every sign-in and syncs Desktop/Documents/Pictures in the background.' `
+            'IMPORTANT: files marked "online-only" (cloud icon) will not open on this PC afterwards. They stay safe in your OneDrive account online. Right-click your OneDrive folder > "Always keep on this device" first if you need them offline.' `
+            @(@{ Type = 'OneDrive' })
+        $t.Group = $G_CORE
+        $t.Status = 'Installed'
+        $t
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 7c. Background jobs. These run in a separate runspace so the window never freezes.
+#     They must be self-contained: they cannot call functions defined in this script.
+# ---------------------------------------------------------------------------
+$ScanJob = {
+    param($sync, $arg)
+    try {
+        $sync.Installed   = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | ForEach-Object { $_.Name } | Sort-Object -Unique)
+        $sync.Provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | ForEach-Object { $_.DisplayName } | Sort-Object -Unique)
+    } catch {
+        $sync.Error = $_.Exception.Message
+    } finally {
+        $sync.Done = $true
+    }
+}
+
+$RestorePointJob = {
+    param($sync, $desc)
+    try {
+        $k = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+        $prev = (Get-ItemProperty $k -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
+        try { Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop } catch {}
+        # Windows silently skips a restore point if one was made in the last 24 h; lift that for this one call.
+        New-ItemProperty $k -Name SystemRestorePointCreationFrequency -Value 0 -PropertyType DWord -Force | Out-Null
+        try {
+            Checkpoint-Computer -Description $desc -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+            $sync.Ok = $true
+        } catch {
+            $sync.Error = $_.Exception.Message
+        } finally {
+            if ($null -eq $prev) { Remove-ItemProperty $k -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue }
+            else { New-ItemProperty $k -Name SystemRestorePointCreationFrequency -Value $prev -PropertyType DWord -Force | Out-Null }
+        }
+    } catch {
+        $sync.Error = $_.Exception.Message
+    } finally {
+        $sync.Done = $true
+    }
+}
+
+$RemovalJob = {
+    param($sync, $arg)
+    function L([string]$m) { $sync.Log.Enqueue($m) }
+    function Test-Match([string]$name, $patterns) {
+        foreach ($p in @($patterns)) { if ($p -and $name -like $p) { return $true } }
+        return $false
+    }
+    function Split-Command([string]$s) {
+        $s = $s.Trim()
+        if ($s -match '^"([^"]+)"\s*(.*)$' -or $s -match '^(.+?\.exe)\s*(.*)$') { return @($Matches[1], $Matches[2].Trim()) }
+        return @($s, '')
+    }
+    try {
+        $protected = $arg.Protected
+        $items = @($arg.Items)
+        $prov = @()
+        $allPkgs = @()
+        if (@($items | Where-Object { $_.Kind -eq 'Appx' }).Count) {
+            L 'Reading installed and provisioned app packages...'
+            $allPkgs = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue)
+            $prov    = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue)
+        }
+
+        foreach ($it in $items) {
+            $r = @{ Id = $it.Id; Kind = $it.Kind; Display = $it.Display; Patterns = $it.Patterns; Ok = $false; Changed = $false; Message = ''; Families = @() }
+            L "> $($it.Display)"
+            try {
+                if ($it.Kind -eq 'Appx') {
+                    $pkgs = @($allPkgs | Where-Object { (Test-Match $_.Name $it.Patterns) -and $_.Name -notmatch $protected -and -not $_.NonRemovable } |
+                              Sort-Object PackageFullName -Unique)
+                    foreach ($p in $pkgs) {
+                        try {
+                            Remove-AppxPackage -Package $p.PackageFullName -AllUsers -ErrorAction Stop
+                            L "  removed $($p.Name)"
+                            $r.Families += $p.PackageFamilyName
+                        } catch {
+                            L "  could not remove $($p.Name): $($_.Exception.Message)"
+                        }
+                    }
+                    # Remove the provisioned copy too, otherwise Windows reinstalls it for new user accounts.
+                    foreach ($pp in @($prov | Where-Object { (Test-Match $_.DisplayName $it.Patterns) -and $_.DisplayName -notmatch $protected })) {
+                        try {
+                            Remove-AppxProvisionedPackage -Online -PackageName $pp.PackageName -ErrorAction Stop | Out-Null
+                            L "  de-provisioned $($pp.DisplayName)"
+                            $r.Changed = $true
+                        } catch {
+                            L "  could not de-provision $($pp.DisplayName): $($_.Exception.Message)"
+                        }
+                    }
+                    $r.Families = @($r.Families | Sort-Object -Unique)
+                }
+                elseif ($it.Kind -eq 'Edge') {
+                    $appDir  = Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application'
+                    $edgeExe = Join-Path $appDir 'msedge.exe'
+                    if (-not (Test-Path $edgeExe)) {
+                        $r.Ok = $true; $r.Message = 'Edge was not installed.'
+                    } else {
+                        $cmd = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Microsoft Edge' -ErrorAction SilentlyContinue).UninstallString
+                        if (-not $cmd) {
+                            $setup = Get-ChildItem (Join-Path $appDir '*\Installer\setup.exe') -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+                            if ($setup) { $cmd = "`"$($setup.FullName)`" --uninstall --msedge --channel=stable --system-level --verbose-logging" }
+                        }
+                        if (-not $cmd) { throw "Edge's uninstaller (setup.exe) was not found." }
+                        $exe, $edgeArgs = Split-Command $cmd
+                        Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+                        # Outside the EEA the uninstaller refuses unless these two markers exist.
+                        # Both are temporary and are removed again right after the uninstaller exits.
+                        $devKey     = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdateDev'
+                        $hadDevKey  = Test-Path $devKey
+                        $stubDir    = Join-Path $env:SystemRoot 'SystemApps\Microsoft.MicrosoftEdge_8wekyb3d8bbwe'
+                        $stub       = Join-Path $stubDir 'MicrosoftEdge.exe'
+                        $hadStubDir = Test-Path $stubDir
+                        $hadStub    = Test-Path $stub
+                        $exitCode   = $null
+                        try {
+                            try { New-Item $devKey -Force | Out-Null; New-ItemProperty $devKey -Name AllowUninstall -Value 1 -PropertyType DWord -Force | Out-Null }
+                            catch { L "  note: could not set the AllowUninstall marker: $($_.Exception.Message)" }
+                            try { if (-not $hadStub) { New-Item $stub -ItemType File -Force | Out-Null } }
+                            catch { L "  note: could not create the legacy Edge marker: $($_.Exception.Message)" }
+                            L '  running the Edge uninstaller (can take a minute)...'
+                            $proc = Start-Process -FilePath $exe -ArgumentList "$edgeArgs --force-uninstall" -Wait -PassThru -WindowStyle Hidden
+                            $exitCode = $proc.ExitCode
+                            L "  uninstaller exit code: $exitCode"
+                        } finally {
+                            if (-not $hadStub)    { Remove-Item $stub -Force -ErrorAction SilentlyContinue }
+                            if (-not $hadStubDir) { Remove-Item $stubDir -Recurse -Force -ErrorAction SilentlyContinue }
+                            if ($hadDevKey) { Remove-ItemProperty $devKey -Name AllowUninstall -ErrorAction SilentlyContinue }
+                            else { Remove-Item $devKey -Recurse -Force -ErrorAction SilentlyContinue }
+                        }
+                        Start-Sleep -Seconds 3
+                        if (Test-Path $edgeExe) {
+                            $r.Message = "Microsoft's uninstaller refused (exit code $exitCode). Edge is still installed. Its background and startup features can still be turned off on the Memory / RAM page."
+                        } else {
+                            # Documented Edge Update policy: stop Edge Update from silently reinstalling Edge Stable.
+                            $pol = 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate'
+                            New-Item $pol -Force | Out-Null
+                            New-ItemProperty $pol -Name 'Install{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}' -Value 0 -PropertyType DWord -Force | Out-Null
+                            foreach ($lnk in "$env:PUBLIC\Desktop\Microsoft Edge.lnk", "$env:USERPROFILE\Desktop\Microsoft Edge.lnk",
+                                             "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Microsoft Edge.lnk",
+                                             "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Microsoft Edge.lnk") {
+                                Remove-Item $lnk -Force -ErrorAction SilentlyContinue
+                            }
+                            $r.Ok = $true; $r.Changed = $true
+                            $r.Message = 'Removed. WebView2 Runtime kept.'
+                            L '  Edge removed; WebView2 Runtime kept'
+                        }
+                    }
+                }
+                elseif ($it.Kind -eq 'OneDrive') {
+                    $exes = @("$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe", "$env:ProgramFiles\Microsoft OneDrive\OneDrive.exe", "${env:ProgramFiles(x86)}\Microsoft OneDrive\OneDrive.exe")
+                    $cmds = @()
+                    foreach ($k in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe',
+                                   'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe',
+                                   'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe') {
+                        $u = (Get-ItemProperty $k -ErrorAction SilentlyContinue).UninstallString
+                        if ($u) { $cmds += $u }
+                    }
+                    if (-not $cmds.Count) {
+                        foreach ($s in "$env:SystemRoot\System32\OneDriveSetup.exe", "$env:SystemRoot\SysWOW64\OneDriveSetup.exe") {
+                            if (Test-Path $s) { $cmds += "`"$s`" /uninstall"; break }
+                        }
+                    }
+                    if (-not $cmds.Count) { throw "OneDrive's uninstaller was not found." }
+                    Get-Process OneDrive -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                    foreach ($c in $cmds) {
+                        $exe, $odArgs = Split-Command $c
+                        if (-not $odArgs) { $odArgs = '/uninstall' }
+                        L "  running OneDrive uninstaller..."
+                        $proc = Start-Process -FilePath $exe -ArgumentList $odArgs -Wait -PassThru -WindowStyle Hidden
+                        L "  exit code: $($proc.ExitCode)"
+                    }
+                    Start-Sleep -Seconds 2
+                    $left = @($exes | Where-Object { Test-Path $_ })
+                    if ($left.Count) { $r.Message = "OneDrive is still present ($($left -join ', '))." }
+                    else {
+                        $r.Ok = $true; $r.Changed = $true
+                        $r.Message = 'Removed. Your OneDrive folder and cloud files were not deleted.'
+                    }
+                }
+            } catch {
+                $r.Message = $_.Exception.Message
+                L "  FAILED: $($r.Message)"
+            }
+            [void]$sync.Results.Add($r)
+        }
+
+        # Verify Store-app removals against a fresh package list - report what is actually gone.
+        $appx = @($sync.Results | Where-Object { $_.Kind -eq 'Appx' })
+        if ($appx.Count) {
+            L 'Verifying removals...'
+            $after = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue)
+            foreach ($r in $appx) {
+                $left = @($after | Where-Object { (Test-Match $_.Name $r.Patterns) -and $_.Name -notmatch $protected } | ForEach-Object { $_.Name } | Sort-Object -Unique)
+                if ($left.Count) { $r.Ok = $false; $r.Message = "Still installed: $($left -join ', ')" }
+                else { $r.Ok = $true; $r.Message = 'Removed.' }
+            }
+        }
+    } catch {
+        $sync.Error = $_.Exception.Message
+    } finally {
+        $sync.Done = $true
+    }
+}
+
+# ---------------------------------------------------------------------------
 # 8. UI (WPF)
 # ---------------------------------------------------------------------------
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="WinOptimizer" Width="1180" Height="760" MinWidth="980" MinHeight="620"
-        WindowStartupLocation="CenterScreen" Background="#0D1117" FontFamily="Segoe UI" FontSize="13"
-        Foreground="#E6EDF3">
+        Title="WinOptimizer" Width="1280" Height="830" MinWidth="1040" MinHeight="680"
+        WindowStartupLocation="CenterScreen" Background="#0B0E14" Foreground="#E6EAF2"
+        FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13"
+        UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display">
   <Window.Resources>
-    <Style TargetType="GridViewColumnHeader">
-      <Setter Property="Background" Value="#161B22"/>
-      <Setter Property="Foreground" Value="#8B949E"/>
-      <Setter Property="BorderBrush" Value="#30363D"/>
-      <Setter Property="HorizontalContentAlignment" Value="Left"/>
-      <Setter Property="Padding" Value="6,4"/>
-    </Style>
+    <FontFamily x:Key="Icons">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
+    <LinearGradientBrush x:Key="AccentGrad" StartPoint="0,0" EndPoint="1,1">
+      <GradientStop Color="#4F8CFF" Offset="0"/>
+      <GradientStop Color="#8B5CF6" Offset="1"/>
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="RamGrad" StartPoint="0,0" EndPoint="1,0">
+      <GradientStop Color="#38BDF8" Offset="0"/>
+      <GradientStop Color="#4F8CFF" Offset="1"/>
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="CpuGrad" StartPoint="0,0" EndPoint="1,0">
+      <GradientStop Color="#A78BFA" Offset="0"/>
+      <GradientStop Color="#EC4899" Offset="1"/>
+    </LinearGradientBrush>
 
+    <!-- Buttons -->
     <Style x:Key="Btn" TargetType="Button">
-      <Setter Property="Foreground" Value="#E6EDF3"/>
-      <Setter Property="Background" Value="#21262D"/>
-      <Setter Property="BorderBrush" Value="#30363D"/>
-      <Setter Property="Padding" Value="14,7"/>
-      <Setter Property="Margin" Value="0,0,8,0"/>
+      <Setter Property="Foreground" Value="#E6EAF2"/>
+      <Setter Property="Background" Value="#171D2A"/>
+      <Setter Property="BorderBrush" Value="#283246"/>
+      <Setter Property="Padding" Value="14,8"/>
+      <Setter Property="Margin" Value="0,0,8,8"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
             <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-                    BorderThickness="1" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                    BorderThickness="1" CornerRadius="8" Padding="{TemplateBinding Padding}">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.85"/></Trigger>
-              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.4"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.7"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.35"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
     </Style>
     <Style x:Key="PrimaryBtn" TargetType="Button" BasedOn="{StaticResource Btn}">
-      <Setter Property="Background" Value="#238636"/>
-      <Setter Property="BorderBrush" Value="#2EA043"/>
-      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Background" Value="{StaticResource AccentGrad}"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
+      <Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style x:Key="HeroBtn" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="Background" Value="White"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
+      <Setter Property="Foreground" Value="#1E1B4B"/>
+      <Setter Property="Padding" Value="20,11"/>
+      <Setter Property="Margin" Value="0"/>
     </Style>
 
-    <Style TargetType="CheckBox">
-      <Setter Property="Foreground" Value="#E6EDF3"/>
-      <Setter Property="VerticalAlignment" Value="Top"/>
+    <!-- Toggle switch (used for every tweak) -->
+    <Style x:Key="Switch" TargetType="CheckBox">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <Grid Background="Transparent">
+              <Border x:Name="Track" Width="46" Height="24" CornerRadius="12" Background="#202838" BorderBrush="#36425A" BorderThickness="1"/>
+              <Ellipse x:Name="Knob" Width="16" Height="16" Fill="#8C96A8" HorizontalAlignment="Left" Margin="5,0,0,0"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Track" Property="Background" Value="{StaticResource AccentGrad}"/>
+                <Setter TargetName="Track" Property="BorderBrush" Value="Transparent"/>
+                <Setter TargetName="Knob" Property="Fill" Value="White"/>
+                <Setter TargetName="Knob" Property="Margin" Value="25,0,0,0"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.3"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
 
+    <!-- Slim scrollbars -->
+    <Style TargetType="ScrollBar">
+      <Setter Property="Width" Value="10"/>
+      <Setter Property="MinWidth" Value="10"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Track x:Name="PART_Track" Orientation="Vertical" IsDirectionReversed="True" Width="6" HorizontalAlignment="Center">
+              <Track.Thumb>
+                <Thumb>
+                  <Thumb.Template>
+                    <ControlTemplate TargetType="Thumb"><Border Background="#2A3446" CornerRadius="3"/></ControlTemplate>
+                  </Thumb.Template>
+                </Thumb>
+              </Track.Thumb>
+            </Track>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Width" Value="Auto"/>
+          <Setter Property="MinWidth" Value="0"/>
+          <Setter Property="Height" Value="10"/>
+          <Setter Property="MinHeight" Value="10"/>
+          <Setter Property="Template">
+            <Setter.Value>
+              <ControlTemplate TargetType="ScrollBar">
+                <Track x:Name="PART_Track" Orientation="Horizontal" Height="6" VerticalAlignment="Center">
+                  <Track.Thumb>
+                    <Thumb>
+                      <Thumb.Template>
+                        <ControlTemplate TargetType="Thumb"><Border Background="#2A3446" CornerRadius="3"/></ControlTemplate>
+                      </Thumb.Template>
+                    </Thumb>
+                  </Track.Thumb>
+                </Track>
+              </ControlTemplate>
+            </Setter.Value>
+          </Setter>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <!-- Rounded meters -->
+    <Style x:Key="Meter" TargetType="ProgressBar">
+      <Setter Property="Height" Value="8"/>
+      <Setter Property="Maximum" Value="100"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ProgressBar">
+            <Grid>
+              <Border x:Name="PART_Track" Background="#1C2331" CornerRadius="4"/>
+              <Border x:Name="PART_Indicator" Background="{TemplateBinding Foreground}" CornerRadius="4" HorizontalAlignment="Left"/>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Sidebar navigation -->
     <Style TargetType="TabItem">
-      <Setter Property="Foreground" Value="#8B949E"/>
+      <Setter Property="Foreground" Value="#8C96A8"/>
+      <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="TabItem">
-            <Border x:Name="bd" Background="Transparent" CornerRadius="6" Padding="14,10" Margin="8,2">
-              <ContentPresenter ContentSource="Header" />
-            </Border>
+            <Grid Margin="12,2">
+              <Border x:Name="bd" Background="Transparent" CornerRadius="8" Padding="14,10">
+                <ContentPresenter ContentSource="Header"/>
+              </Border>
+              <Border x:Name="bar" Width="3" CornerRadius="2" HorizontalAlignment="Left" Margin="0,10"
+                      Background="{StaticResource AccentGrad}" Visibility="Collapsed"/>
+            </Grid>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsSelected" Value="True">
-                <Setter TargetName="bd" Property="Background" Value="#1F2937"/>
-                <Setter Property="Foreground" Value="#E6EDF3"/>
-              </Trigger>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter Property="Foreground" Value="#E6EDF3"/>
+                <Setter TargetName="bd" Property="Background" Value="#141A26"/>
+                <Setter Property="Foreground" Value="#E6EAF2"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#1A2233"/>
+                <Setter TargetName="bar" Property="Visibility" Value="Visible"/>
+                <Setter Property="Foreground" Value="White"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -980,24 +1401,116 @@ function Get-SystemSummary {
       </Setter>
     </Style>
 
+    <Style x:Key="Card" TargetType="Border">
+      <Setter Property="Background" Value="#121722"/>
+      <Setter Property="BorderBrush" Value="#1F2735"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="14"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True"><Setter Property="BorderBrush" Value="#33405A"/></Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style x:Key="PageTitle" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="28"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style x:Key="PageSub" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#8C96A8"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+      <Setter Property="MaxWidth" Value="860"/>
+      <Setter Property="HorizontalAlignment" Value="Left"/>
+      <Setter Property="LineHeight" Value="20"/>
+      <Setter Property="Margin" Value="0,6,0,16"/>
+    </Style>
+    <Style x:Key="StatLabel" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#8C96A8"/>
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+    </Style>
+
+    <Style TargetType="GridViewColumnHeader">
+      <Setter Property="Foreground" Value="#6B7588"/>
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="GridViewColumnHeader">
+            <Border Background="Transparent" BorderBrush="#1F2735" BorderThickness="0,0,0,1" Padding="8,0,8,8">
+              <ContentPresenter HorizontalAlignment="Left"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="ListViewItem">
+      <Setter Property="Foreground" Value="#E6EAF2"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ListViewItem">
+            <Border x:Name="b" Background="Transparent" CornerRadius="6" Padding="0,6">
+              <GridViewRowPresenter Columns="{TemplateBinding GridView.ColumnCollection}" Content="{TemplateBinding Content}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#171E2C"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="ListBoxItem">
+      <Setter Property="Foreground" Value="#E6EAF2"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ListBoxItem">
+            <Border x:Name="b" Background="#121722" BorderBrush="#1F2735" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="0,0,0,8">
+              <ContentPresenter/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#33405A"/></Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="b" Property="BorderBrush" Value="#4F8CFF"/>
+                <Setter TargetName="b" Property="Background" Value="#16203A"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- One card per tweak / app -->
     <DataTemplate x:Key="TweakTemplate">
-      <Border Background="#161B22" BorderBrush="#30363D" BorderThickness="1" CornerRadius="8" Padding="14,12" Margin="0,0,0,8">
+      <Border Style="{StaticResource Card}" Padding="20,16" Margin="0,0,14,10">
         <Grid>
           <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
-          <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                    IsEnabled="{Binding IsAvailable}" Margin="0,3,14,0"/>
-          <StackPanel Grid.Column="1">
-            <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#E6EDF3" TextTrimming="CharacterEllipsis"/>
-            <TextBlock Text="{Binding Description}" TextWrapping="Wrap" Foreground="#8B949E" Margin="0,4,0,0"/>
-            <TextBlock Text="{Binding TradeoffText}" TextWrapping="Wrap" Foreground="#D2A8FF" Margin="0,4,0,0" FontSize="12"/>
+          <StackPanel>
+            <WrapPanel>
+              <TextBlock Text="{Binding Name}" FontSize="15" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center" Margin="0,0,10,0"/>
+              <Border Background="{Binding RiskBg}" CornerRadius="10" Padding="9,2" VerticalAlignment="Center">
+                <TextBlock Text="{Binding Risk}" Foreground="{Binding RiskColor}" FontSize="11" FontWeight="Bold"/>
+              </Border>
+            </WrapPanel>
+            <TextBlock Text="{Binding Description}" TextWrapping="Wrap" Foreground="#9AA4B6" Margin="0,7,0,0" LineHeight="19"/>
+            <Grid Margin="0,9,0,0">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <TextBlock Text="&#xE946;" FontFamily="{StaticResource Icons}" Foreground="#B79CFF" FontSize="12" Margin="0,3,8,0"/>
+              <TextBlock Grid.Column="1" Text="{Binding Tradeoff}" TextWrapping="Wrap" Foreground="#B79CFF" FontSize="12" LineHeight="18"/>
+            </Grid>
           </StackPanel>
-          <StackPanel Grid.Column="2" Margin="14,0,0,0" MinWidth="110">
-            <Border Background="{Binding RiskColor}" CornerRadius="9" Padding="9,2" HorizontalAlignment="Right">
-              <TextBlock Text="{Binding Risk}" Foreground="#0D1117" FontWeight="Bold" FontSize="11"/>
-            </Border>
-            <TextBlock Text="{Binding Status}" Foreground="{Binding StatusColor}" FontSize="11" Margin="0,6,0,0" HorizontalAlignment="Right"/>
+          <StackPanel Grid.Column="1" Margin="28,0,0,0" MinWidth="130">
+            <CheckBox Style="{StaticResource Switch}" HorizontalAlignment="Right"
+                      IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                      IsEnabled="{Binding IsAvailable}"/>
+            <TextBlock Text="{Binding Status}" Foreground="{Binding StatusColor}" FontSize="11" Margin="0,10,0,0"
+                       HorizontalAlignment="Right" TextAlignment="Right" TextWrapping="Wrap" MaxWidth="170"/>
           </StackPanel>
         </Grid>
       </Border>
@@ -1010,79 +1523,148 @@ function Get-SystemSummary {
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
 
-    <TabControl x:Name="Tabs" TabStripPlacement="Left" Background="#0D1117" BorderThickness="0" Padding="0">
+    <TabControl x:Name="Tabs" TabStripPlacement="Left" BorderThickness="0" Padding="0" Background="Transparent">
       <TabControl.Template>
         <ControlTemplate TargetType="TabControl">
           <Grid>
-            <Grid.ColumnDefinitions><ColumnDefinition Width="230"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-            <Border Background="#161B22" BorderBrush="#30363D" BorderThickness="0,0,1,0">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="250"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Border Background="#0E121A" BorderBrush="#1A2130" BorderThickness="0,0,1,0">
               <DockPanel>
-                <StackPanel DockPanel.Dock="Top" Margin="22,22,10,18">
-                  <TextBlock Text="WinOptimizer" FontSize="20" FontWeight="Bold" Foreground="#E6EDF3"/>
-                  <TextBlock Text="safe &amp; reversible tuning" Foreground="#8B949E" FontSize="12"/>
+                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="24,28,12,28">
+                  <Border Width="40" Height="40" CornerRadius="12" Background="{StaticResource AccentGrad}">
+                    <TextBlock Text="&#xE945;" FontFamily="{StaticResource Icons}" Foreground="White" FontSize="19"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                  </Border>
+                  <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                    <TextBlock Text="WinOptimizer" FontSize="18" FontWeight="Bold" Foreground="White"/>
+                    <TextBlock Text="Safe, reversible tuning" FontSize="11" Foreground="#6B7588"/>
+                  </StackPanel>
                 </StackPanel>
-                <StackPanel IsItemsHost="True" DockPanel.Dock="Top"/>
-                <TextBlock DockPanel.Dock="Bottom" VerticalAlignment="Bottom" Margin="22,0,10,18" TextWrapping="Wrap"
-                           Foreground="#6E7681" FontSize="11"
-                           Text="Every change is backed up and can be undone from Backup &amp; Restore."/>
+                <Border DockPanel.Dock="Bottom" Margin="18,0,18,20" Padding="14,12" CornerRadius="12" Background="#121722" BorderBrush="#1F2735" BorderThickness="1">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="Auto"/>
+                      <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="&#xEA18;" FontFamily="{StaticResource Icons}" Foreground="#34D399" FontSize="16" Margin="0,1,10,0"/>
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap" Foreground="#8C96A8" FontSize="11" LineHeight="16"
+                               Text="Every setting change is backed up and can be undone from Backup &amp; Restore."/>
+                  </Grid>
+                </Border>
+                <StackPanel IsItemsHost="True"/>
               </DockPanel>
             </Border>
-            <ContentPresenter Grid.Column="1" ContentSource="SelectedContent" Margin="26,22,26,10"/>
+            <ContentPresenter Grid.Column="1" ContentSource="SelectedContent" Margin="34,28,20,14"/>
           </Grid>
         </ControlTemplate>
       </TabControl.Template>
 
-      <!-- DASHBOARD -->
-      <TabItem Header="Dashboard">
-        <Grid>
-          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-          <StackPanel>
-            <TextBlock Text="Dashboard" FontSize="24" FontWeight="SemiBold"/>
-            <TextBlock x:Name="SysInfo" Foreground="#8B949E" Margin="0,2,0,16"/>
+      <!-- ================= DASHBOARD ================= -->
+      <TabItem>
+        <TabItem.Header>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="&#xE9D2;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+            <TextBlock Text="Dashboard" FontSize="14" VerticalAlignment="Center"/>
           </StackPanel>
-          <UniformGrid Grid.Row="1" Columns="3" Margin="0,0,0,16">
-            <Border Background="#161B22" BorderBrush="#30363D" BorderThickness="1" CornerRadius="10" Padding="18" Margin="0,0,10,0">
+        </TabItem.Header>
+        <Grid Margin="0,0,14,0">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+
+          <Border CornerRadius="18" Padding="28,24" Margin="0,0,0,18">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#1D3B8B" Offset="0"/>
+                <GradientStop Color="#4C1D95" Offset="1"/>
+              </LinearGradientBrush>
+            </Border.Background>
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
               <StackPanel>
-                <TextBlock Text="MEMORY IN USE" Foreground="#8B949E" FontSize="11" FontWeight="SemiBold"/>
-                <TextBlock x:Name="RamText" FontSize="28" FontWeight="Bold" Margin="0,6,0,6" Text="-"/>
-                <ProgressBar x:Name="RamBar" Height="8" Maximum="100" Background="#21262D" Foreground="#2F81F7" BorderThickness="0"/>
-                <TextBlock x:Name="RamSub" Foreground="#8B949E" FontSize="12" Margin="0,6,0,0"/>
+                <TextBlock Text="Your PC at a glance" FontSize="28" FontWeight="SemiBold" Foreground="White"/>
+                <TextBlock x:Name="SysInfo" Foreground="#C7D2FE" Margin="0,8,0,0" TextWrapping="Wrap" Text="Loading..."/>
+                <TextBlock x:Name="GpuLine" Foreground="#A5B4FC" FontSize="12" Margin="0,3,0,0" TextWrapping="Wrap"/>
+              </StackPanel>
+              <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="20,0,0,0">
+                <Button x:Name="BtnQuick" Style="{StaticResource HeroBtn}">
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="&#xE945;" FontFamily="{StaticResource Icons}" Margin="0,1,9,0"/>
+                    <TextBlock Text="Quick optimize"/>
+                  </StackPanel>
+                </Button>
+                <TextBlock Text="Safe, recommended settings only" Foreground="#C7D2FE" FontSize="11" Margin="0,8,0,0" HorizontalAlignment="Center"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+
+          <UniformGrid Grid.Row="1" Columns="3" Margin="0,0,0,18">
+            <Border Style="{StaticResource Card}" Padding="22,18" Margin="0,0,9,0">
+              <StackPanel>
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE945;" FontFamily="{StaticResource Icons}" Foreground="#38BDF8" Margin="0,0,8,0"/>
+                  <TextBlock Text="MEMORY IN USE" Style="{StaticResource StatLabel}"/>
+                </StackPanel>
+                <TextBlock x:Name="RamText" FontSize="30" FontWeight="SemiBold" Foreground="White" Margin="0,10,0,10" Text="-"/>
+                <ProgressBar x:Name="RamBar" Style="{StaticResource Meter}" Foreground="{StaticResource RamGrad}"/>
+                <TextBlock x:Name="RamSub" Foreground="#8C96A8" FontSize="12" Margin="0,10,0,0"/>
               </StackPanel>
             </Border>
-            <Border Background="#161B22" BorderBrush="#30363D" BorderThickness="1" CornerRadius="10" Padding="18" Margin="5,0,5,0">
+            <Border Style="{StaticResource Card}" Padding="22,18" Margin="9,0,9,0">
               <StackPanel>
-                <TextBlock Text="CPU LOAD" Foreground="#8B949E" FontSize="11" FontWeight="SemiBold"/>
-                <TextBlock x:Name="CpuText" FontSize="28" FontWeight="Bold" Margin="0,6,0,6" Text="-"/>
-                <ProgressBar x:Name="CpuBar" Height="8" Maximum="100" Background="#21262D" Foreground="#A371F7" BorderThickness="0"/>
-                <TextBlock x:Name="PlanText" Foreground="#8B949E" FontSize="12" Margin="0,6,0,0"/>
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xEC4A;" FontFamily="{StaticResource Icons}" Foreground="#A78BFA" Margin="0,0,8,0"/>
+                  <TextBlock Text="CPU LOAD" Style="{StaticResource StatLabel}"/>
+                </StackPanel>
+                <TextBlock x:Name="CpuText" FontSize="30" FontWeight="SemiBold" Foreground="White" Margin="0,10,0,10" Text="-"/>
+                <ProgressBar x:Name="CpuBar" Style="{StaticResource Meter}" Foreground="{StaticResource CpuGrad}"/>
+                <TextBlock x:Name="PlanText" Foreground="#8C96A8" FontSize="12" Margin="0,10,0,0"/>
               </StackPanel>
             </Border>
-            <Border Background="#161B22" BorderBrush="#30363D" BorderThickness="1" CornerRadius="10" Padding="18" Margin="10,0,0,0">
+            <Border Style="{StaticResource Card}" Padding="22,18" Margin="9,0,0,0">
               <StackPanel>
-                <TextBlock Text="SINCE LAST APPLY" Foreground="#8B949E" FontSize="11" FontWeight="SemiBold"/>
-                <TextBlock x:Name="DeltaText" FontSize="28" FontWeight="Bold" Margin="0,6,0,6" Text="-"/>
-                <TextBlock x:Name="DeltaSub" Foreground="#8B949E" FontSize="12" TextWrapping="Wrap"
-                           Text="Apply tweaks, then reboot, to see the real difference."/>
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE81C;" FontFamily="{StaticResource Icons}" Foreground="#34D399" Margin="0,0,8,0"/>
+                  <TextBlock Text="SINCE LAST APPLY" Style="{StaticResource StatLabel}"/>
+                </StackPanel>
+                <TextBlock x:Name="DeltaText" FontSize="30" FontWeight="SemiBold" Foreground="#34D399" Margin="0,10,0,6" Text="-"/>
+                <TextBlock x:Name="DeltaSub" Foreground="#8C96A8" FontSize="12" TextWrapping="Wrap" LineHeight="17"
+                           Text="Apply changes, then restart, to see the real difference."/>
               </StackPanel>
             </Border>
           </UniformGrid>
-          <Border Grid.Row="2" Background="#161B22" BorderBrush="#30363D" BorderThickness="1" CornerRadius="10" Padding="16">
+
+          <Border Grid.Row="2" Style="{StaticResource Card}" Padding="22,18">
             <DockPanel>
-              <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
-                <Button x:Name="BtnRefreshProc" DockPanel.Dock="Right" Content="Refresh" Style="{StaticResource Btn}" Margin="0"/>
+              <DockPanel DockPanel.Dock="Top" Margin="0,0,0,14">
+                <Button x:Name="BtnRefreshProc" DockPanel.Dock="Right" Style="{StaticResource Btn}" Margin="0" VerticalAlignment="Center">
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="&#xE72C;" FontFamily="{StaticResource Icons}" Margin="0,1,8,0"/>
+                    <TextBlock Text="Refresh"/>
+                  </StackPanel>
+                </Button>
                 <StackPanel VerticalAlignment="Center">
-                  <TextBlock Text="Top processes by memory (grouped)" FontSize="15" FontWeight="SemiBold"/>
-                  <TextBlock x:Name="ProcNote" Foreground="#6E7681" FontSize="11"
+                  <TextBlock Text="Top processes by memory" FontSize="16" FontWeight="SemiBold" Foreground="White"/>
+                  <TextBlock x:Name="ProcNote" Foreground="#6B7588" FontSize="11" Margin="0,3,0,0"
                              Text="Memory = private working set, the same figure as Task Manager's Memory column."/>
                 </StackPanel>
               </DockPanel>
-              <ListView x:Name="ProcList" Background="Transparent" BorderThickness="0" Foreground="#E6EDF3"
+              <ListView x:Name="ProcList" Background="Transparent" BorderThickness="0" Foreground="#E6EAF2"
+                        ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                         VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
                 <ListView.View>
                   <GridView>
-                    <GridViewColumn Header="Process" Width="300" DisplayMemberBinding="{Binding Name}"/>
-                    <GridViewColumn Header="Instances" Width="90" DisplayMemberBinding="{Binding Count}"/>
-                    <GridViewColumn Header="Memory (MB)" Width="130" DisplayMemberBinding="{Binding MB}"/>
+                    <GridViewColumn Header="PROCESS" Width="320" DisplayMemberBinding="{Binding Name}"/>
+                    <GridViewColumn Header="INSTANCES" Width="100" DisplayMemberBinding="{Binding Count}"/>
+                    <GridViewColumn Header="MEMORY (MB)" Width="130" DisplayMemberBinding="{Binding MB}"/>
                     <GridViewColumn Header="CPU" Width="90" DisplayMemberBinding="{Binding CpuText}"/>
                   </GridView>
                 </ListView.View>
@@ -1092,99 +1674,210 @@ function Get-SystemSummary {
         </Grid>
       </TabItem>
 
-      <!-- MEMORY -->
-      <TabItem Header="Memory / RAM">
+      <!-- ================= MEMORY ================= -->
+      <TabItem>
+        <TabItem.Header>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="&#xE945;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+            <TextBlock Text="Memory &amp; RAM" FontSize="14" VerticalAlignment="Center"/>
+          </StackPanel>
+        </TabItem.Header>
         <DockPanel>
-          <StackPanel DockPanel.Dock="Top" Margin="0,0,0,12">
-            <TextBlock Text="Memory / RAM" FontSize="24" FontWeight="SemiBold"/>
-            <TextBlock Foreground="#8B949E" TextWrapping="Wrap" Margin="0,2,0,10"
-                       Text="Background services, features and processes Windows runs by default. Green = safe for virtually everyone. Yellow = read the trade-off first. Nothing is uninstalled."/>
+          <StackPanel DockPanel.Dock="Top">
+            <TextBlock Text="Memory &amp; RAM" Style="{StaticResource PageTitle}"/>
+            <TextBlock Style="{StaticResource PageSub}"
+                       Text="Background services and features Windows runs by default. Green = safe for almost everyone. Yellow = read the trade-off first. Settings are only changed, never deleted, so all of them can be undone."/>
             <WrapPanel>
-              <Button x:Name="BtnMemRec"  Content="Select recommended" Style="{StaticResource Btn}"/>
+              <Button x:Name="BtnMemRec" Content="Select recommended" Style="{StaticResource Btn}"/>
               <Button x:Name="BtnMemNone" Content="Select none" Style="{StaticResource Btn}"/>
-              <Button x:Name="BtnTrim"    Content="Trim RAM now (temporary)" Style="{StaticResource Btn}"
-                      ToolTip="Asks every process to release unused pages. Windows reclaims them as apps need them again, so the effect is short-lived. Changes nothing permanently."/>
+              <Button x:Name="BtnTrim" Content="Trim RAM now (temporary)" Style="{StaticResource Btn}"
+                      ToolTip="Asks every process to release unused pages. Windows pages memory back in as apps need it, so the effect is short-lived."/>
             </WrapPanel>
           </StackPanel>
-          <ScrollViewer VerticalScrollBarVisibility="Auto"><ItemsControl x:Name="MemList" ItemTemplate="{StaticResource TweakTemplate}"/></ScrollViewer>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0">
+            <ItemsControl x:Name="MemList" ItemTemplate="{StaticResource TweakTemplate}"/>
+          </ScrollViewer>
         </DockPanel>
       </TabItem>
 
-      <!-- STARTUP -->
-      <TabItem Header="Startup apps">
+      <!-- ================= BLOATWARE ================= -->
+      <TabItem>
+        <TabItem.Header>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="&#xE74D;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+            <TextBlock Text="Remove bloatware" FontSize="14" VerticalAlignment="Center"/>
+          </StackPanel>
+        </TabItem.Header>
         <DockPanel>
-          <StackPanel DockPanel.Dock="Top" Margin="0,0,0,12">
-            <TextBlock Text="Startup apps" FontSize="24" FontWeight="SemiBold"/>
-            <TextBlock Foreground="#8B949E" TextWrapping="Wrap" Margin="0,2,0,10"
-                       Text="Programs that launch at sign-in - usually the single biggest source of avoidable RAM use. Ticked items are disabled exactly the way Task Manager does it (nothing is deleted). Windows Security is hidden and never touched."/>
+          <StackPanel DockPanel.Dock="Top">
+            <TextBlock Text="Remove bloatware" Style="{StaticResource PageTitle}"/>
+            <TextBlock Style="{StaticResource PageSub}"
+                       Text="Preinstalled apps found on this PC. Only apps on a curated list are shown - the Store, app installer, security, drivers and system components can never be removed here. Nothing is selected until you choose."/>
+            <Border Background="#1F1A0B" BorderBrush="#4A3B12" BorderThickness="1" CornerRadius="10" Padding="14,10" Margin="0,0,0,14" MaxWidth="860" HorizontalAlignment="Left">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="&#xE7BA;" FontFamily="{StaticResource Icons}" Foreground="#FBBF24" FontSize="15" Margin="0,1,10,0"/>
+                <TextBlock Grid.Column="1" TextWrapping="Wrap" Foreground="#E9D9A6" FontSize="12" LineHeight="18"
+                           Text="Uninstalling removes the app for every user on this PC and stops Windows reinstalling it for new accounts. Unlike settings, an uninstall cannot be undone with one click - but every Store app can be reinstalled for free, and Backup &amp; Restore gives you a direct link to each one."/>
+              </Grid>
+            </Border>
+            <WrapPanel>
+              <Button x:Name="BtnBloatRec" Content="Select recommended" Style="{StaticResource Btn}"/>
+              <Button x:Name="BtnBloatNone" Content="Select none" Style="{StaticResource Btn}"/>
+              <Button x:Name="BtnBloatRescan" Style="{StaticResource Btn}">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE72C;" FontFamily="{StaticResource Icons}" Margin="0,1,8,0"/>
+                  <TextBlock Text="Rescan"/>
+                </StackPanel>
+              </Button>
+              <TextBlock x:Name="BloatStatus" Foreground="#8C96A8" VerticalAlignment="Center" Margin="6,0,0,8" Text="Scanning installed apps..."/>
+            </WrapPanel>
+          </StackPanel>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0">
+            <ItemsControl x:Name="BloatList" ItemTemplate="{StaticResource TweakTemplate}">
+              <ItemsControl.GroupStyle>
+                <GroupStyle>
+                  <GroupStyle.HeaderTemplate>
+                    <DataTemplate>
+                      <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="Bold" Foreground="#6B7588" Margin="2,10,0,10"/>
+                    </DataTemplate>
+                  </GroupStyle.HeaderTemplate>
+                </GroupStyle>
+              </ItemsControl.GroupStyle>
+            </ItemsControl>
+          </ScrollViewer>
+        </DockPanel>
+      </TabItem>
+
+      <!-- ================= STARTUP ================= -->
+      <TabItem>
+        <TabItem.Header>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="&#xE7E8;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+            <TextBlock Text="Startup apps" FontSize="14" VerticalAlignment="Center"/>
+          </StackPanel>
+        </TabItem.Header>
+        <DockPanel>
+          <StackPanel DockPanel.Dock="Top">
+            <TextBlock Text="Startup apps" Style="{StaticResource PageTitle}"/>
+            <TextBlock Style="{StaticResource PageSub}"
+                       Text="Programs that launch when you sign in - usually the biggest source of avoidable RAM use. Switching one on disables it at startup exactly like Task Manager does (nothing is deleted). Windows Security is hidden and never touched."/>
             <WrapPanel>
               <Button x:Name="BtnStartNone" Content="Select none" Style="{StaticResource Btn}"/>
               <Button x:Name="BtnStartReload" Content="Reload list" Style="{StaticResource Btn}"/>
             </WrapPanel>
           </StackPanel>
-          <ScrollViewer VerticalScrollBarVisibility="Auto"><ItemsControl x:Name="StartList" ItemTemplate="{StaticResource TweakTemplate}"/></ScrollViewer>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0">
+            <ItemsControl x:Name="StartList" ItemTemplate="{StaticResource TweakTemplate}"/>
+          </ScrollViewer>
         </DockPanel>
       </TabItem>
 
-      <!-- CPU -->
-      <TabItem Header="CPU">
+      <!-- ================= CPU ================= -->
+      <TabItem>
+        <TabItem.Header>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="&#xEC4A;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+            <TextBlock Text="CPU" FontSize="14" VerticalAlignment="Center"/>
+          </StackPanel>
+        </TabItem.Header>
         <DockPanel>
-          <StackPanel DockPanel.Dock="Top" Margin="0,0,0,12">
-            <TextBlock Text="CPU" FontSize="24" FontWeight="SemiBold"/>
-            <TextBlock Foreground="#8B949E" TextWrapping="Wrap" Margin="0,2,0,10"
-                       Text="Scheduling and power settings that favour responsiveness and games. Gains are real but modest - typically smoother frame times rather than higher average FPS."/>
+          <StackPanel DockPanel.Dock="Top">
+            <TextBlock Text="CPU" Style="{StaticResource PageTitle}"/>
+            <TextBlock Style="{StaticResource PageSub}"
+                       Text="Scheduling and power settings that favour responsiveness and games. Expect smoother frame times and snappier input rather than much higher average FPS."/>
             <WrapPanel>
-              <Button x:Name="BtnCpuRec"  Content="Select recommended" Style="{StaticResource Btn}"/>
+              <Button x:Name="BtnCpuRec" Content="Select recommended" Style="{StaticResource Btn}"/>
               <Button x:Name="BtnCpuNone" Content="Select none" Style="{StaticResource Btn}"/>
             </WrapPanel>
           </StackPanel>
-          <ScrollViewer VerticalScrollBarVisibility="Auto"><ItemsControl x:Name="CpuList" ItemTemplate="{StaticResource TweakTemplate}"/></ScrollViewer>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0">
+            <ItemsControl x:Name="CpuList" ItemTemplate="{StaticResource TweakTemplate}"/>
+          </ScrollViewer>
         </DockPanel>
       </TabItem>
 
-      <!-- GPU -->
-      <TabItem Header="GPU">
+      <!-- ================= GPU ================= -->
+      <TabItem>
+        <TabItem.Header>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="&#xE7FC;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+            <TextBlock Text="GPU" FontSize="14" VerticalAlignment="Center"/>
+          </StackPanel>
+        </TabItem.Header>
         <DockPanel>
-          <StackPanel DockPanel.Dock="Top" Margin="0,0,0,12">
-            <TextBlock Text="GPU" FontSize="24" FontWeight="SemiBold"/>
-            <TextBlock x:Name="GpuInfo" Foreground="#8B949E" TextWrapping="Wrap" Margin="0,2,0,10"/>
+          <StackPanel DockPanel.Dock="Top">
+            <TextBlock Text="GPU" Style="{StaticResource PageTitle}"/>
+            <TextBlock x:Name="GpuInfo" Style="{StaticResource PageSub}"/>
             <WrapPanel>
-              <Button x:Name="BtnGpuRec"  Content="Select recommended" Style="{StaticResource Btn}"/>
+              <Button x:Name="BtnGpuRec" Content="Select recommended" Style="{StaticResource Btn}"/>
               <Button x:Name="BtnGpuNone" Content="Select none" Style="{StaticResource Btn}"/>
             </WrapPanel>
           </StackPanel>
-          <ScrollViewer VerticalScrollBarVisibility="Auto"><ItemsControl x:Name="GpuList" ItemTemplate="{StaticResource TweakTemplate}"/></ScrollViewer>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0">
+            <ItemsControl x:Name="GpuList" ItemTemplate="{StaticResource TweakTemplate}"/>
+          </ScrollViewer>
         </DockPanel>
       </TabItem>
 
-      <!-- RESTORE -->
-      <TabItem Header="Backup &amp; Restore">
-        <DockPanel>
-          <StackPanel DockPanel.Dock="Top" Margin="0,0,0,12">
-            <TextBlock Text="Backup &amp; Restore" FontSize="24" FontWeight="SemiBold"/>
-            <TextBlock Foreground="#8B949E" TextWrapping="Wrap" Margin="0,2,0,10"
-                       Text="Each time you apply changes, the previous value of everything touched is saved here. Restoring puts those exact values back. For a full rollback you can also use the System Restore point created before applying (rstrui.exe)."/>
+      <!-- ================= RESTORE ================= -->
+      <TabItem>
+        <TabItem.Header>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="&#xE81C;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+            <TextBlock Text="Backup &amp; Restore" FontSize="14" VerticalAlignment="Center"/>
+          </StackPanel>
+        </TabItem.Header>
+        <DockPanel Margin="0,0,14,0">
+          <StackPanel DockPanel.Dock="Top">
+            <TextBlock Text="Backup &amp; Restore" Style="{StaticResource PageTitle}"/>
+            <TextBlock Style="{StaticResource PageSub}"
+                       Text="Every apply saves the previous value of everything it changed. Restoring puts those exact values back, and lists any removed apps with a direct link to reinstall them. For a full rollback you can also use the System Restore point created before applying."/>
             <WrapPanel>
-              <Button x:Name="BtnRestore"      Content="Restore selected backup" Style="{StaticResource PrimaryBtn}"/>
+              <Button x:Name="BtnRestore" Style="{StaticResource PrimaryBtn}">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE777;" FontFamily="{StaticResource Icons}" Margin="0,1,8,0"/>
+                  <TextBlock Text="Restore selected backup"/>
+                </StackPanel>
+              </Button>
               <Button x:Name="BtnRestorePoint" Content="Create restore point now" Style="{StaticResource Btn}"/>
               <Button x:Name="BtnOpenSysRestore" Content="Open System Restore" Style="{StaticResource Btn}"/>
-              <Button x:Name="BtnOpenFolder"   Content="Open backup folder" Style="{StaticResource Btn}"/>
+              <Button x:Name="BtnOpenFolder" Content="Open backup folder" Style="{StaticResource Btn}"/>
             </WrapPanel>
           </StackPanel>
-          <ListBox x:Name="BackupList" Background="#161B22" BorderBrush="#30363D" Foreground="#E6EDF3" Padding="6"/>
+          <ListBox x:Name="BackupList" Background="Transparent" BorderThickness="0" Margin="0,8,0,0"
+                   ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
         </DockPanel>
       </TabItem>
     </TabControl>
 
-    <!-- Bottom bar: log + apply -->
-    <Border Grid.Row="1" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,1,0,0" Padding="16,10">
+    <!-- ================= Bottom bar ================= -->
+    <Border Grid.Row="1" Background="#0E121A" BorderBrush="#1A2130" BorderThickness="0,1,0,0" Padding="24,12">
       <Grid>
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <TextBox x:Name="LogBox" Height="92" IsReadOnly="True" Background="#0D1117" Foreground="#8B949E" BorderBrush="#30363D"
-                 FontFamily="Consolas" FontSize="11" VerticalScrollBarVisibility="Auto" TextWrapping="NoWrap" Padding="6"/>
-        <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center">
-          <TextBlock x:Name="SelCount" Foreground="#8B949E" HorizontalAlignment="Right" Margin="0,0,0,8" Text="0 changes selected"/>
-          <Button x:Name="BtnApply" Content="Review &amp; apply..." Style="{StaticResource PrimaryBtn}" Margin="0" Padding="22,10" FontSize="14"/>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <DockPanel>
+          <StackPanel x:Name="BusyPanel" DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6" Visibility="Collapsed">
+            <Ellipse Width="8" Height="8" Fill="#4F8CFF" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <TextBlock x:Name="BusyText" Foreground="#C7D2FE" FontWeight="SemiBold"/>
+          </StackPanel>
+          <TextBox x:Name="LogBox" Height="74" IsReadOnly="True" Background="#0B0E14" Foreground="#8C96A8" BorderBrush="#1F2735"
+                   FontFamily="Cascadia Mono, Consolas" FontSize="11" VerticalScrollBarVisibility="Auto"
+                   HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap" Padding="8,6"/>
+        </DockPanel>
+        <StackPanel Grid.Column="1" Margin="22,0,0,0" VerticalAlignment="Center">
+          <TextBlock x:Name="SelCount" Foreground="#8C96A8" HorizontalAlignment="Right" Margin="0,0,0,8" Text="0 changes selected"/>
+          <Button x:Name="BtnApply" Style="{StaticResource PrimaryBtn}" Margin="0" Padding="26,12" FontSize="14">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="&#xE73E;" FontFamily="{StaticResource Icons}" Margin="0,2,9,0"/>
+              <TextBlock Text="Review &amp; apply"/>
+            </StackPanel>
+          </Button>
         </StackPanel>
       </Grid>
     </Border>
@@ -1194,27 +1887,37 @@ function Get-SystemSummary {
 
 $window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $ui = @{}
-foreach ($n in 'Tabs','SysInfo','RamText','RamBar','RamSub','CpuText','CpuBar','PlanText','DeltaText','DeltaSub','ProcList','BtnRefreshProc',
-               'MemList','BtnMemRec','BtnMemNone','BtnTrim','StartList','BtnStartNone','BtnStartReload',
-               'CpuList','BtnCpuRec','BtnCpuNone','GpuList','GpuInfo','BtnGpuRec','BtnGpuNone',
-               'BackupList','ProcNote','BtnRestore','BtnRestorePoint','BtnOpenSysRestore','BtnOpenFolder','LogBox','SelCount','BtnApply') {
+foreach ($n in @(
+    'Tabs','SysInfo','GpuLine','BtnQuick','RamText','RamBar','RamSub','CpuText','CpuBar','PlanText','DeltaText','DeltaSub',
+    'ProcList','ProcNote','BtnRefreshProc','MemList','BtnMemRec','BtnMemNone','BtnTrim',
+    'BloatList','BloatStatus','BtnBloatRec','BtnBloatNone','BtnBloatRescan',
+    'StartList','BtnStartNone','BtnStartReload','CpuList','BtnCpuRec','BtnCpuNone','GpuList','GpuInfo','BtnGpuRec','BtnGpuNone',
+    'BackupList','BtnRestore','BtnRestorePoint','BtnOpenSysRestore','BtnOpenFolder',
+    'LogBox','BusyPanel','BusyText','SelCount','BtnApply')) {
     $ui[$n] = $window.FindName($n)
+    if (-not $ui[$n]) { throw "UI element '$n' not found" }
 }
 $script:LogBox = $ui.LogBox
 
 # ---------------------------------------------------------------------------
 # 9. State + UI wiring
 # ---------------------------------------------------------------------------
-$script:Catalog   = @()
-$script:Startup   = @()
+$script:Catalog    = @()
+$script:Startup    = @()
+$script:Bloat      = @()
 $script:BaselineMB = $null
+$script:Busy       = $false
+$script:BusySince  = Get-Date
+$script:BusyLabel  = ''
+$script:Jobs       = New-Object System.Collections.ArrayList
+$script:ApplyCtx   = $null
 
-function Get-AllTweaks { @($script:Catalog) + @($script:Startup) }
+function Get-AllTweaks { @($script:Catalog) + @($script:Startup) + @($script:Bloat) }
 
 function Update-SelCount {
     $n = @(Get-AllTweaks | Where-Object { $_.IsSelected }).Count
-    $ui.SelCount.Text = "$n change$(if ($n -ne 1) {'s'}) selected"
-    $ui.BtnApply.IsEnabled = $n -gt 0
+    $ui.SelCount.Text = if ($n -eq 1) { '1 change selected' } else { "$n changes selected" }
+    $ui.BtnApply.IsEnabled = ($n -gt 0) -and (-not $script:Busy)
 }
 
 function Register-SelectionWatch($tweaks) {
@@ -1223,6 +1926,75 @@ function Register-SelectionWatch($tweaks) {
     }
 }
 
+function Set-Busy([bool]$On, [string]$Label = '') {
+    $script:Busy = $On
+    if ($On) {
+        $script:BusySince = Get-Date
+        $script:BusyLabel = $Label
+        $ui.BusyText.Text = $Label
+        $ui.BusyPanel.Visibility = 'Visible'
+        $window.Cursor = [System.Windows.Input.Cursors]::AppStarting
+        if (-not $script:JobTimer.IsEnabled) { $script:JobTimer.Start() }
+    } else {
+        $ui.BusyPanel.Visibility = 'Collapsed'
+        $window.Cursor = $null
+    }
+    foreach ($b in 'BtnQuick','BtnRestore','BtnRestorePoint','BtnBloatRescan') { $ui[$b].IsEnabled = -not $On }
+    Update-SelCount
+}
+
+# ---------- background job plumbing ----------
+function Start-BgJob([scriptblock]$Script, $Argument, [scriptblock]$OnDone) {
+    $sync = [hashtable]::Synchronized(@{
+        Log     = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
+        Results = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+        Done    = $false
+        Ok      = $false
+        Error   = $null
+    })
+    $rs = [runspacefactory]::CreateRunspace()
+    $rs.Open()
+    $ps = [powershell]::Create()
+    $ps.Runspace = $rs
+    # Pass the script as text so it is bound to the new runspace, not this one.
+    [void]$ps.AddScript($Script.ToString()).AddArgument($sync).AddArgument($Argument)
+    $handle = $ps.BeginInvoke()
+    [void]$script:Jobs.Add(@{ Sync = $sync; PS = $ps; RS = $rs; Handle = $handle; OnDone = $OnDone })
+    if (-not $script:JobTimer.IsEnabled) { $script:JobTimer.Start() }
+}
+
+function Receive-BgJobs {
+    foreach ($j in @($script:Jobs)) {
+        $msg = $null
+        while ($j.Sync.Log.TryDequeue([ref]$msg)) { Write-Log $msg }
+        if (-not ($j.Sync.Done -or $j.Handle.IsCompleted)) { continue }
+        try { [void]$j.PS.EndInvoke($j.Handle) } catch { if (-not $j.Sync.Error) { $j.Sync.Error = $_.Exception.Message } }
+        while ($j.Sync.Log.TryDequeue([ref]$msg)) { Write-Log $msg }
+        foreach ($err in @($j.PS.Streams.Error | Select-Object -First 5)) { Write-Log "  $err" 'WARN' }
+        $j.PS.Dispose()
+        $j.RS.Dispose()
+        $script:Jobs.Remove($j)
+        if ($j.OnDone) {
+            try { & $j.OnDone $j.Sync }
+            catch {
+                Write-Log "Error after background task: $($_.Exception.Message)" 'ERR'
+                Set-Busy $false
+            }
+        }
+    }
+}
+
+$script:JobTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:JobTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:JobTimer.add_Tick({
+    try { Receive-BgJobs } catch { Write-Log "Background task error: $($_.Exception.Message)" 'ERR' }
+    if ($script:Busy) {
+        $ui.BusyText.Text = '{0}...  {1:N0}s' -f $script:BusyLabel, ((Get-Date) - $script:BusySince).TotalSeconds
+    }
+    if ($script:Jobs.Count -eq 0 -and -not $script:Busy) { $script:JobTimer.Stop() }
+})
+
+# ---------- loading lists ----------
 function Load-Catalog {
     $script:Catalog = @(Get-TweakCatalog)
     foreach ($t in $script:Catalog) {
@@ -1239,30 +2011,55 @@ function Load-Startup {
     $script:Startup = @(Get-StartupTweaks)
     Register-SelectionWatch $script:Startup
     $ui.StartList.ItemsSource = $script:Startup
-    Write-Log "Found $($script:Startup.Count) startup entries."
 }
 
 function Load-Backups {
     $ui.BackupList.Items.Clear()
     Get-ChildItem -Path $BackupDir -Filter 'backup-*.json' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | ForEach-Object {
-        $count = 0
-        try { $count = @((Get-Content $_.FullName -Raw | ConvertFrom-Json).Entries).Count } catch {}
+        $entries = @()
+        try { $entries = @((Get-Content $_.FullName -Raw | ConvertFrom-Json).Entries) } catch {}
+        $apps = @($entries | Where-Object { $_.Type -in @('Appx','Edge','OneDrive') }).Count
+        $settings = $entries.Count - $apps
         $item = New-Object System.Windows.Controls.ListBoxItem
-        $item.Content = "{0}    -    {1} change(s)" -f $_.LastWriteTime.ToString('yyyy-MM-dd  HH:mm:ss'), $count
+        $item.Content = '{0}      {1} setting change(s)  -  {2} app removal(s)' -f $_.LastWriteTime.ToString('dddd d MMM yyyy, HH:mm'), $settings, $apps
         $item.Tag = $_.FullName
-        $item.Padding = New-Object System.Windows.Thickness(8,6,8,6)
-        $ui.BackupList.Items.Add($item) | Out-Null
+        [void]$ui.BackupList.Items.Add($item)
+    }
+    if ($ui.BackupList.Items.Count -eq 0) {
+        $item = New-Object System.Windows.Controls.ListBoxItem
+        $item.Content = 'No backups yet - one is created automatically every time you apply changes.'
+        $item.IsEnabled = $false
+        [void]$ui.BackupList.Items.Add($item)
+    }
+}
+
+function Start-BloatScan {
+    $ui.BloatStatus.Text = 'Scanning installed apps...'
+    $script:Bloat = @()
+    $ui.BloatList.ItemsSource = $null
+    Update-SelCount
+    Start-BgJob $ScanJob $null {
+        param($sync)
+        if ($sync.Error) { $ui.BloatStatus.Text = "Could not list apps: $($sync.Error)"; return }
+        $script:Bloat = @(Get-BloatTweaks $sync.Installed $sync.Provisioned)
+        Register-SelectionWatch $script:Bloat
+        $ui.BloatList.ItemsSource = $script:Bloat
+        $ui.BloatList.Items.GroupDescriptions.Clear()
+        [void]$ui.BloatList.Items.GroupDescriptions.Add((New-Object System.Windows.Data.PropertyGroupDescription 'Group'))
+        $ui.BloatStatus.Text = if ($script:Bloat.Count) { "$($script:Bloat.Count) removable item(s) found on this PC." } else { 'No known bloatware found on this PC.' }
+        Update-SelCount
     }
 }
 
 function Set-Selection($category, [bool]$recommendedOnly, [bool]$none) {
-    foreach ($t in ($script:Catalog | Where-Object Category -eq $category)) {
+    $list = if ($category -eq 'Bloat') { $script:Bloat } else { @($script:Catalog | Where-Object Category -eq $category) }
+    foreach ($t in $list) {
         if ($none) { $t.IsSelected = $false }
         else { $t.IsSelected = $t.IsAvailable -and $t.Recommended -and $t.Status -ne 'Applied' }
     }
 }
 
-# The UI thread only reads the latest snapshot produced by the background collector - it never waits on WMI.
+# ---------- live stats (the UI thread only reads the collector's latest snapshot) ----------
 $script:LastProcVersion = -1
 function Update-Stats {
     $snap = [WinOpt.Collector]::Current
@@ -1297,12 +2094,14 @@ function Update-Stats {
 function Update-Processes { [WinOpt.Collector]::RequestProcs() }
 
 # ---------- Preview / confirm dialog ----------
+$CategoryTitles = [ordered]@{ Memory = 'Memory & RAM settings'; Startup = 'Startup apps to disable'; CPU = 'CPU settings'; GPU = 'GPU settings'; Bloat = 'Apps to UNINSTALL' }
+
 function Show-Preview($selected) {
     $sb = New-Object System.Text.StringBuilder
-    foreach ($cat in 'Memory','Startup','CPU','GPU') {
+    foreach ($cat in $CategoryTitles.Keys) {
         $group = @($selected | Where-Object Category -eq $cat)
         if (-not $group.Count) { continue }
-        [void]$sb.AppendLine("==== $cat ====")
+        [void]$sb.AppendLine("==== $($CategoryTitles[$cat]) ($($group.Count)) ====")
         foreach ($t in $group) {
             [void]$sb.AppendLine("[$($t.Risk)] $($t.Name)")
             [void]$sb.AppendLine("    Trade-off: $($t.Tradeoff)")
@@ -1314,23 +2113,23 @@ function Show-Preview($selected) {
     $dlgXaml = [xml]@'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Review changes" Width="900" Height="640" WindowStartupLocation="CenterOwner"
-        Background="#0D1117" Foreground="#E6EDF3" FontFamily="Segoe UI" FontSize="13">
-  <DockPanel Margin="20">
-    <StackPanel DockPanel.Dock="Top" Margin="0,0,0,12">
-      <TextBlock Text="Review exactly what will change" FontSize="20" FontWeight="SemiBold"/>
-      <TextBlock x:Name="Summary" Foreground="#8B949E" TextWrapping="Wrap" Margin="0,4,0,0"/>
+        Title="Review changes" Width="940" Height="680" WindowStartupLocation="CenterOwner"
+        Background="#0B0E14" Foreground="#E6EAF2" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13">
+  <DockPanel Margin="26,22">
+    <StackPanel DockPanel.Dock="Top" Margin="0,0,0,14">
+      <TextBlock Text="Review exactly what will change" FontSize="22" FontWeight="SemiBold" Foreground="White"/>
+      <TextBlock x:Name="Summary" Foreground="#8C96A8" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="19"/>
     </StackPanel>
-    <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
-      <CheckBox x:Name="ChkRp" IsChecked="True" Foreground="#E6EDF3" Margin="0,0,0,12"
-                Content="Create a System Restore point first (recommended, can take up to a minute)"/>
+    <StackPanel DockPanel.Dock="Bottom" Margin="0,16,0,0">
+      <CheckBox x:Name="ChkRp" IsChecked="True" Foreground="#E6EAF2" Margin="0,0,0,14"
+                Content="Create a System Restore point first (recommended - runs in the background, usually under a minute)"/>
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-        <Button x:Name="Cancel" Content="Cancel" Style="{DynamicResource Btn}" IsCancel="True"/>
-        <Button x:Name="Ok" Content="Apply changes" Style="{DynamicResource PrimaryBtn}" Margin="0"/>
+        <Button x:Name="Cancel" Content="Cancel" Style="{DynamicResource Btn}" IsCancel="True" Margin="0,0,10,0"/>
+        <Button x:Name="Ok" Content="Apply changes" Style="{DynamicResource PrimaryBtn}" Margin="0" Padding="22,9"/>
       </StackPanel>
     </StackPanel>
-    <TextBox x:Name="Details" IsReadOnly="True" FontFamily="Consolas" FontSize="12" Background="#161B22" Foreground="#E6EDF3"
-             BorderBrush="#30363D" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Padding="8"/>
+    <TextBox x:Name="Details" IsReadOnly="True" FontFamily="Cascadia Mono, Consolas" FontSize="12" Background="#121722" Foreground="#D6DCE8"
+             BorderBrush="#1F2735" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Padding="12,10"/>
   </DockPanel>
 </Window>
 '@
@@ -1338,8 +2137,11 @@ function Show-Preview($selected) {
     $dlg.Owner = $window
     $dlg.Resources.MergedDictionaries.Add($window.Resources)
     $script:PreviewDlg = $dlg
-    $mod = @($selected | Where-Object Risk -ne 'Safe').Count
-    $dlg.FindName('Summary').Text = "$($selected.Count) item(s) selected, $mod of them marked Moderate. Current value -> new value is shown for every setting. Original values are saved to a backup you can restore at any time."
+    $removals = @($selected | Where-Object Category -eq 'Bloat').Count
+    $risky    = @($selected | Where-Object Risk -ne 'Safe').Count
+    $summary  = "$($selected.Count) item(s) selected ($risky marked Moderate/Advanced). Current value -> new value is listed for every setting, and setting changes are saved to a backup you can restore."
+    if ($removals) { $summary += "  $removals app item(s) will be UNINSTALLED - these can be reinstalled from the Store but not undone with one click." }
+    $dlg.FindName('Summary').Text = $summary
     $dlg.FindName('Details').Text = $sb.ToString()
     $script:PreviewResult = $null
     $dlg.FindName('Ok').add_Click({
@@ -1350,103 +2152,213 @@ function Show-Preview($selected) {
     return $script:PreviewResult
 }
 
-# ---------- Apply ----------
+# ---------- Apply pipeline: restore point (bg) -> settings (UI) -> app removal (bg) -> summary ----------
+function Save-ApplyBackup {
+    $ctx = $script:ApplyCtx
+    if (-not $ctx -or -not $ctx.Entries.Count) { return }
+    @{ Created = (Get-Date).ToString('o'); Computer = $env:COMPUTERNAME; Entries = @($ctx.Entries) } |
+        ConvertTo-Json -Depth 6 | Set-Content -Path $ctx.BackupPath -Encoding UTF8
+}
+
 function Invoke-Apply {
+    if ($script:Busy) { return }
     $selected = @(Get-AllTweaks | Where-Object { $_.IsSelected -and $_.IsAvailable })
     if (-not $selected.Count) { return }
     $choice = Show-Preview $selected
     if (-not $choice) { Write-Log 'Cancelled - nothing was changed.'; return }
 
-    $window.Cursor = [System.Windows.Input.Cursors]::Wait
-    $ui.BtnApply.IsEnabled = $false
-    try {
-        $script:BaselineMB = (Get-MemStats).UsedMB
+    $script:ApplyCtx = @{
+        Selected   = $selected
+        Entries    = New-Object System.Collections.ArrayList
+        Failures   = New-Object System.Collections.ArrayList
+        BackupPath = Join-Path $BackupDir ('backup-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    }
+    $script:BaselineMB = (Get-MemStats).UsedMB
 
-        if ($choice.RestorePoint) {
-            Write-Log 'Creating System Restore point (the window may pause briefly)...'
-            if (New-SafetyRestorePoint) { Write-Log 'Restore point created.' 'OK' }
-            else {
-                $r = [System.Windows.MessageBox]::Show(
-                    "A System Restore point could not be created (System Protection may be off or blocked by policy).`n`nA JSON backup of every change will still be saved and can be restored from this app.`n`nContinue anyway?",
-                    'WinOptimizer', 'YesNo', 'Warning')
-                if ($r -ne 'Yes') { Write-Log 'Aborted by user - nothing was changed.'; return }
-            }
+    if ($choice.RestorePoint) {
+        Set-Busy $true 'Creating System Restore point'
+        Write-Log 'Creating System Restore point...'
+        Start-BgJob $RestorePointJob "WinOptimizer - before changes $(Get-Date -Format 'yyyy-MM-dd HH:mm')" {
+            param($sync)
+            if ($sync.Ok) { Write-Log 'Restore point created.' 'OK'; Invoke-ApplyChanges; return }
+            Write-Log "Restore point failed: $($sync.Error)" 'ERR'
+            $r = [System.Windows.MessageBox]::Show(
+                "A System Restore point could not be created (System Protection may be off or blocked by policy).`n`nSetting changes are still backed up by this app and can be restored.`n`nContinue anyway?",
+                'WinOptimizer', 'YesNo', 'Warning')
+            if ($r -eq 'Yes') { Invoke-ApplyChanges } else { Write-Log 'Aborted - nothing was changed.'; Set-Busy $false }
         }
-
-        $entries = New-Object System.Collections.ArrayList
-        $backupPath = Join-Path $BackupDir ("backup-{0}.json" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-        $errors = 0
-        try {
-            foreach ($t in $selected) {
-                Write-Log "> $($t.Name)"
-                foreach ($a in $t.Actions) {
-                    try {
-                        $e = Invoke-Action $a
-                        if ($e) { [void]$entries.Add($e) }
-                    } catch {
-                        $errors++
-                        Write-Log "  FAILED: $($_.Exception.Message)" 'ERR'
-                    }
-                }
-                $t.IsSelected = $false
-            }
-        } finally {
-            # Always persist the backup, even if something above threw.
-            if ($entries.Count) {
-                @{ Created = (Get-Date).ToString('o'); Computer = $env:COMPUTERNAME; Entries = @($entries) } |
-                    ConvertTo-Json -Depth 6 | Set-Content -Path $backupPath -Encoding UTF8
-                Write-Log "Backup saved: $backupPath" 'OK'
-            }
-        }
-
-        foreach ($t in $script:Catalog) { Update-TweakStatus $t }
-        Load-Startup
-        Load-Backups
-        [WinOpt.Collector]::RequestPlan()
-        [WinOpt.Collector]::RequestProcs()
-        Start-Sleep -Milliseconds 1500
-        Update-Stats
-        $ui.DeltaSub.Text = 'Measured right after applying. Most savings (services, startup apps, svchost grouping) only fully show after a reboot.'
-
-        $msg = "Done. $($entries.Count) setting(s) changed, $errors error(s).`n`nA restart is recommended so that service, startup and scheduler changes take full effect.`n`nRestart now?"
-        $r = [System.Windows.MessageBox]::Show($msg, 'WinOptimizer', 'YesNo', 'Information')
-        if ($r -eq 'Yes') { Restart-Computer -Force }
-    } finally {
-        $window.Cursor = $null
-        Update-SelCount
+    } else {
+        Invoke-ApplyChanges
     }
 }
 
+function Invoke-ApplyChanges {
+    $ctx = $script:ApplyCtx
+    Set-Busy $true 'Applying settings'
+    foreach ($t in @($ctx.Selected | Where-Object Category -ne 'Bloat')) {
+        Write-Log "> $($t.Name)"
+        foreach ($a in $t.Actions) {
+            try {
+                $e = Invoke-Action $a
+                if ($e) { [void]$ctx.Entries.Add($e) }
+            } catch {
+                [void]$ctx.Failures.Add("$($t.Name): $($_.Exception.Message)")
+                Write-Log "  FAILED: $($_.Exception.Message)" 'ERR'
+            }
+        }
+        $t.IsSelected = $false
+    }
+    Save-ApplyBackup
+
+    $removals = @($ctx.Selected | Where-Object Category -eq 'Bloat')
+    if ($removals.Count) {
+        $items = @($removals | ForEach-Object {
+            $a = @($_.Actions)[0]
+            @{ Id = $_.Id; Kind = $a.Type; Patterns = @($a.Patterns); Display = $_.Name }
+        })
+        foreach ($t in $removals) { $t.IsSelected = $false }
+        Set-Busy $true "Uninstalling $($items.Count) app item(s) - this can take a few minutes"
+        Start-BgJob $RemovalJob @{ Items = $items; Protected = $ProtectedAppx } { param($sync) Complete-Apply $sync }
+    } else {
+        Complete-Apply $null
+    }
+}
+
+function Complete-Apply($sync) {
+    $ctx = $script:ApplyCtx
+    $settingsChanged = $ctx.Entries.Count
+    $removedOk = 0; $removalTotal = 0
+    if ($sync) {
+        if ($sync.Error) { [void]$ctx.Failures.Add("App removal: $($sync.Error)") }
+        foreach ($r in @($sync.Results)) {
+            $removalTotal++
+            foreach ($fam in @($r.Families | Where-Object { $_ })) {
+                [void]$ctx.Entries.Add([ordered]@{ Type = 'Appx'; FamilyName = $fam; Display = $r.Display })
+            }
+            if ($r.Changed -and $r.Kind -in @('Edge','OneDrive')) {
+                [void]$ctx.Entries.Add([ordered]@{ Type = $r.Kind; Display = $r.Display })
+            }
+            if ($r.Ok) { $removedOk++; Write-Log "  $($r.Display): $($r.Message)" 'OK' }
+            else { [void]$ctx.Failures.Add("$($r.Display): $($r.Message)"); Write-Log "  $($r.Display): $($r.Message)" 'ERR' }
+        }
+        Save-ApplyBackup
+    }
+    if ($ctx.Entries.Count) { Write-Log "Backup saved: $($ctx.BackupPath)" 'OK' }
+
+    foreach ($t in $script:Catalog) { Update-TweakStatus $t }
+    Load-Startup
+    Load-Backups
+    if ($sync) { Start-BloatScan }
+    [WinOpt.Collector]::RequestPlan()
+    [WinOpt.Collector]::RequestProcs()
+    Set-Busy $false
+    $ui.DeltaSub.Text = 'Measured since you clicked Apply. Most savings (services, startup apps, removed apps) only fully show after a restart.'
+
+    $msg = "Finished.`n`n- Settings changed: $settingsChanged"
+    if ($sync) { $msg += "`n- App items removed: $removedOk of $removalTotal (each one verified)" }
+    if ($ctx.Failures.Count) {
+        $msg += "`n`nProblems ($($ctx.Failures.Count)):`n" + ((@($ctx.Failures) | Select-Object -First 8 | ForEach-Object { "- $_" }) -join "`n")
+        if ($ctx.Failures.Count -gt 8) { $msg += "`n- ...see the log at the bottom of the window" }
+    }
+    $msg += "`n`nRestart now so everything takes full effect?"
+    $icon = if ($ctx.Failures.Count) { 'Warning' } else { 'Information' }
+    $res = [System.Windows.MessageBox]::Show($msg, 'WinOptimizer', 'YesNo', $icon)
+    if ($res -eq 'Yes') { Restart-Computer -Force }
+}
+
 # ---------- Restore ----------
+function Show-ReinstallDialog($entries) {
+    $dx = [xml]@'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Reinstall removed apps" Width="600" Height="560" WindowStartupLocation="CenterOwner"
+        Background="#0B0E14" Foreground="#E6EAF2" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13">
+  <DockPanel Margin="26,22">
+    <StackPanel DockPanel.Dock="Top" Margin="0,0,0,16">
+      <TextBlock Text="Reinstall removed apps" FontSize="22" FontWeight="SemiBold" Foreground="White"/>
+      <TextBlock TextWrapping="Wrap" Foreground="#8C96A8" Margin="0,6,0,0" LineHeight="19"
+                 Text="Uninstalled apps cannot be put back automatically. Click an app to open its Microsoft Store (or download) page, then press Get / Install."/>
+    </StackPanel>
+    <Button x:Name="Close" DockPanel.Dock="Bottom" Content="Close" HorizontalAlignment="Right" Style="{DynamicResource Btn}" Margin="0,16,0,0" IsCancel="True"/>
+    <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel x:Name="Rows"/></ScrollViewer>
+  </DockPanel>
+</Window>
+'@
+    $dlg = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $dx))
+    $dlg.Owner = $window
+    $dlg.Resources.MergedDictionaries.Add($window.Resources)
+    $rows = $dlg.FindName('Rows')
+    foreach ($e in $entries) {
+        $uri = switch ($e.Type) {
+            'Appx'     { "ms-windows-store://pdp/?PFN=$($e.FamilyName)" }
+            'Edge'     { 'https://www.microsoft.com/edge/download' }
+            'OneDrive' { 'https://www.microsoft.com/microsoft-365/onedrive/download' }
+        }
+        $label = if ($e.Type -eq 'Appx') { "$($e.Display)   -   $($e.FamilyName -replace '_.*$', '')" } else { "$($e.Display)   -   download page" }
+        $b = New-Object System.Windows.Controls.Button
+        $b.Content = $label
+        $b.Tag = $uri
+        $b.Style = $window.FindResource('Btn')
+        $b.Margin = New-Object System.Windows.Thickness(0, 0, 0, 8)
+        $b.add_Click({ Start-Process $this.Tag })
+        [void]$rows.Children.Add($b)
+    }
+    [void]$dlg.ShowDialog()
+}
+
 function Invoke-Restore {
+    if ($script:Busy) { return }
     $item = $ui.BackupList.SelectedItem
-    if (-not $item) { [System.Windows.MessageBox]::Show('Select a backup first.', 'WinOptimizer') | Out-Null; return }
+    if (-not $item -or -not $item.Tag) { [System.Windows.MessageBox]::Show('Select a backup first.', 'WinOptimizer') | Out-Null; return }
     $path = $item.Tag
-    $r = [System.Windows.MessageBox]::Show("Restore all settings saved in:`n$path`n`nThis puts every value back to what it was before that apply.", 'WinOptimizer', 'OKCancel', 'Question')
+    $r = [System.Windows.MessageBox]::Show("Restore everything saved in this backup?`n`n$path`n`nSettings go back to their exact previous values. Removed apps are listed with links to reinstall them.", 'WinOptimizer', 'OKCancel', 'Question')
     if ($r -ne 'OK') { return }
+
     $data = Get-Content $path -Raw | ConvertFrom-Json
     $list = @($data.Entries)
     [array]::Reverse($list)
-    Write-Log "Restoring $($list.Count) setting(s) from $path"
+    $reinstall = New-Object System.Collections.ArrayList
     $errors = 0
+    Write-Log "Restoring from $path"
     foreach ($e in $list) {
+        if ($e.Type -in @('Appx','Edge','OneDrive')) {
+            [void]$reinstall.Add($e)
+            if ($e.Type -eq 'Edge') {
+                # Lift the Edge Update block so the Edge installer is allowed to run again.
+                Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' -Name 'Install{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}' -ErrorAction SilentlyContinue
+            }
+            continue
+        }
         try { Restore-Entry $e } catch { $errors++; Write-Log "  FAILED: $($_.Exception.Message)" 'ERR' }
     }
     Rename-Item -Path $path -NewName ([IO.Path]::GetFileName($path) -replace '^backup-', 'restored-') -ErrorAction SilentlyContinue
     foreach ($t in $script:Catalog) { Update-TweakStatus $t }
     Load-Startup
     Load-Backups
-    [System.Windows.MessageBox]::Show("Restore finished with $errors error(s). Restart Windows to complete it.", 'WinOptimizer') | Out-Null
+    [WinOpt.Collector]::RequestPlan()
+    [System.Windows.MessageBox]::Show("Settings restored with $errors error(s). Restart Windows to complete it.", 'WinOptimizer') | Out-Null
+    if ($reinstall.Count) { Show-ReinstallDialog $reinstall }
 }
 
 # ---------- Events ----------
 $ui.BtnApply.add_Click({ Invoke-Apply })
+$ui.BtnQuick.add_Click({
+    foreach ($c in 'Memory','CPU','GPU') { Set-Selection $c $true $false }
+    if (-not @(Get-AllTweaks | Where-Object { $_.IsSelected -and $_.IsAvailable }).Count) {
+        [System.Windows.MessageBox]::Show('All recommended settings are already applied on this PC.', 'WinOptimizer') | Out-Null
+        return
+    }
+    Invoke-Apply
+})
 $ui.BtnMemRec.add_Click({ Set-Selection 'Memory' $true $false })
 $ui.BtnMemNone.add_Click({ Set-Selection 'Memory' $false $true })
 $ui.BtnCpuRec.add_Click({ Set-Selection 'CPU' $true $false })
 $ui.BtnCpuNone.add_Click({ Set-Selection 'CPU' $false $true })
 $ui.BtnGpuRec.add_Click({ Set-Selection 'GPU' $true $false })
 $ui.BtnGpuNone.add_Click({ Set-Selection 'GPU' $false $true })
+$ui.BtnBloatRec.add_Click({ Set-Selection 'Bloat' $true $false })
+$ui.BtnBloatNone.add_Click({ Set-Selection 'Bloat' $false $true })
+$ui.BtnBloatRescan.add_Click({ if (-not $script:Busy) { Start-BloatScan } })
 $ui.BtnStartNone.add_Click({ foreach ($t in $script:Startup) { $t.IsSelected = $false } })
 $ui.BtnStartReload.add_Click({ Load-Startup; Update-SelCount })
 $ui.BtnRefreshProc.add_Click({ Update-Processes })
@@ -1460,39 +2372,52 @@ $ui.BtnTrim.add_Click({
 })
 $ui.BtnRestore.add_Click({ Invoke-Restore })
 $ui.BtnRestorePoint.add_Click({
-    Write-Log 'Creating System Restore point...'
-    if (New-SafetyRestorePoint) { Write-Log 'Restore point created.' 'OK' }
+    if ($script:Busy) { return }
+    Set-Busy $true 'Creating System Restore point'
+    Start-BgJob $RestorePointJob "WinOptimizer - manual $(Get-Date -Format 'yyyy-MM-dd HH:mm')" {
+        param($sync)
+        if ($sync.Ok) { Write-Log 'Restore point created.' 'OK' } else { Write-Log "Restore point failed: $($sync.Error)" 'ERR' }
+        Set-Busy $false
+    }
 })
 $ui.BtnOpenSysRestore.add_Click({ Start-Process "$env:SystemRoot\System32\rstrui.exe" })
 $ui.BtnOpenFolder.add_Click({ Start-Process explorer.exe $BackupDir })
 
-# UI refresh: 1 s, and each tick only copies already-collected numbers into labels (microseconds).
+# UI refresh: 1 s; each tick only copies already-collected numbers into labels.
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds(1)
 $timer.add_Tick({ try { Update-Stats } catch {} })
 
 $window.add_Loaded({
-    $ui.SysInfo.Text = 'Loading...'
     [WinOpt.Collector]::Start()
     $timer.Start()
-    # Let the window paint first, then do the one-off registry/service scan.
+    # Let the window paint first, then do the one-off scans.
     [void]$window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ContextIdle, [Action]{
         Write-Log "WinOptimizer started. Log: $LogFile"
         try {
             $info = Get-SystemSummary
             $ui.SysInfo.Text = "$($info.Os)  -  $($info.Cpu)"
-            $ui.GpuInfo.Text = "Detected: $($info.Gpus).  These settings reduce background GPU work and latency. They do not overclock or change driver settings - for that use your GPU vendor's control panel."
+            $ui.GpuLine.Text = "Graphics: $($info.Gpus)"
+            $ui.GpuInfo.Text = "Detected: $($info.Gpus). These settings reduce background GPU work and latency. They do not overclock or change driver settings - use your GPU vendor's app for that."
         } catch {}
         try {
             Load-Catalog
             Load-Startup
             Load-Backups
             Update-SelCount
+            Start-BloatScan
         } catch {
             Write-Log "Startup scan failed: $($_.Exception.Message)" 'ERR'
         }
     })
 })
-$window.add_Closed({ $timer.Stop(); [WinOpt.Collector]::Stop() })
+$window.add_Closing({
+    param($s, $e)
+    if ($script:Busy) {
+        $r = [System.Windows.MessageBox]::Show("Changes are still being applied. Closing now could leave an app half-removed.`n`nClose anyway?", 'WinOptimizer', 'YesNo', 'Warning')
+        if ($r -ne 'Yes') { $e.Cancel = $true }
+    }
+})
+$window.add_Closed({ $timer.Stop(); $script:JobTimer.Stop(); [WinOpt.Collector]::Stop() })
 
 [void]$window.ShowDialog()

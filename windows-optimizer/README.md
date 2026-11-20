@@ -18,8 +18,9 @@ Run it from your own (administrator) Windows account. If you elevate with a *dif
 
 | Page | What it does |
 |---|---|
-| Dashboard | Live RAM and CPU usage, the active power plan, the top processes by memory, and the RAM change since your last apply |
+| Dashboard | Live RAM and CPU usage (same figures as Task Manager), the active power plan, top processes by memory and CPU, and a **Quick optimize** button that applies only the safe, recommended settings |
 | Memory / RAM | Telemetry, Widgets, Edge background/Startup Boost, ads and suggestions, Bing in Start, Copilot/Cortana policies, rarely used services, Xbox services, background Store apps, SysMain, the Search indexer, Print Spooler, svchost grouping |
+| Remove bloatware | Uninstalls preinstalled apps that are on a curated list (News, Clipchamp, Solitaire, Candy Crush, Teams, Xbox apps, etc.), plus **Microsoft Edge** and **OneDrive**. Only apps actually found on the PC are shown, and nothing is pre-selected |
 | Startup apps | Lists everything that launches at sign-in. Disabling works the same way as in Task Manager. Windows Security is hidden and is never touched |
 | CPU | Ultimate/High Performance plan, foreground priority, MMCSS game scheduling, Game Mode, Power Throttling |
 | GPU | Turns off Game DVR background recording, transparency and animations. Also covers hardware-accelerated GPU scheduling and the windowed-game optimizations |
@@ -34,6 +35,22 @@ Run it from your own (administrator) Windows account. If you elevate with a *dif
 - **JSON backup.** The original value of everything changed is saved to `%ProgramData%\WinOptimizer\Backups\backup-*.json`. **Backup & Restore** puts those values back exactly. The backup file is written even if an apply fails halfway.
 - **Services are not deleted.** They are only set to *Manual* (they still start on demand) or *Disabled*.
 - **Log** at `%ProgramData%\WinOptimizer\WinOptimizer.log`.
+
+## Removing bloatware: how it works and its limits
+
+- **Allow-list only.** Only apps in a fixed list can be removed. On top of that, a protected list means the Microsoft Store, App Installer/winget, the VCLibs/.NET/UI.Xaml frameworks, Windows Security, Xbox sign-in, shell components, codecs, Photos, Calculator, Notepad, Terminal and Snipping Tool can never be removed, even if a pattern would match them.
+- **Thorough.** Store apps are removed for every user *and* de-provisioned, so Windows doesn't reinstall them for new accounts.
+- **Verified.** After removing, the tool lists the installed packages again and reports which apps are really gone and which are still there. It never assumes success.
+- **Background work.** Uninstalls run on a background thread, so the window stays responsive.
+- **Reinstalling.** An uninstall can't be undone with one click. Removed apps are recorded in the backup, and **Backup & Restore** shows a button for each one that opens its Microsoft Store page (or the Edge/OneDrive download page).
+- **Microsoft Edge** (marked *Advanced*):
+  - You can only select it if another browser is installed.
+  - The **Edge WebView2 Runtime is always kept**, because Widgets, Teams, Outlook and many launchers need it.
+  - Microsoft officially allows removing Edge only in the EU/EEA. Elsewhere the tool uses the same workaround other open-source debloat tools use: two temporary markers that it removes again straight after.
+  - It also sets the documented Edge Update policy that stops Edge being silently reinstalled.
+  - Some Windows builds still refuse the uninstall. When that happens, the tool tells you instead of claiming success.
+  - A major Windows feature update can bring Edge back.
+- **OneDrive:** files marked "online-only" won't open on the PC after uninstalling. They stay safe in your OneDrive account. Mark the folder *Always keep on this device* first if you need the files offline.
 
 ## What to expect (honest numbers)
 
