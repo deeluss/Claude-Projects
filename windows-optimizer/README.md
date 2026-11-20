@@ -4,6 +4,9 @@ A GUI tool for Windows 10/11 that turns off background features you don't need, 
 
 ## How to run
 
+**Easiest:** download `WinOptimizer.exe` and double-click it. It is a single file with the script embedded, needs only the .NET Framework 4.x that ships with every Windows 10/11, and asks for admin rights itself. Because it is unsigned, SmartScreen may say "Windows protected your PC": click *More info → Run anyway*.
+
+**Alternative (script):**
 1. Put `WinOptimizer.ps1` and `Launch-WinOptimizer.bat` in the same folder.
 2. Double-click **`Launch-WinOptimizer.bat`** and accept the UAC prompt. The tool needs admin rights to change services and HKLM settings.
 3. Tick what you want on each page, click **Review & apply…**, read the preview, then confirm.
@@ -40,3 +43,11 @@ Things to know:
 - "Unused RAM is wasted RAM." Windows fills spare memory with *standby cache*, and it releases that cache instantly when an app needs it. Task Manager counts this cache as *Available*, not *In use*. Any tool that claims to "free" this cache is only making a number look better.
 - **Trim RAM now** really does lower the in-use figure, but only for a short time, because pages come back as apps touch them. That is why it is labelled *temporary*.
 - The CPU/GPU tweaks mostly make frame times smoother and lower latency. They will **not** add large amounts of average FPS. No tweak can stand in for drivers or hardware.
+
+## Rebuilding the .exe
+
+The exe is a small C# launcher (`launcher/Launcher.cs`) with `WinOptimizer.ps1` embedded as a resource. After editing the script, run `launcher/build.sh` (Mono `mcs`), or on Windows:
+
+```
+csc /target:winexe /resource:WinOptimizer.ps1,WinOptimizer.ps1 /r:System.Windows.Forms.dll /out:WinOptimizer.exe launcher\Launcher.cs
+```
