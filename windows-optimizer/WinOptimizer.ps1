@@ -1855,8 +1855,8 @@ $script:Accent = Get-SystemAccent
 [xml]$xaml = $xamlRaw.Replace('__ACCENT__', $script:Accent).Replace('__ACCENTDARK__', (Convert-Shade $script:Accent 0.80)).Replace('__ACCENTLIGHT__', (Convert-Shade $script:Accent 1.88))
 
 $window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
-$icoPath = Join-Path (Split-Path -Parent $PSCommandPath) 'WinOptimizer.ico'
-if (Test-Path $icoPath) { try { $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([Uri]$icoPath) } catch {} }
+$icoPath = if ($env:WINOPT_ICO) { $env:WINOPT_ICO } elseif ($PSCommandPath) { Join-Path (Split-Path -Parent $PSCommandPath) 'WinOptimizer.ico' } else { $null }
+if ($icoPath -and (Test-Path $icoPath)) { try { $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([Uri]$icoPath) } catch {} }
 $ui = @{}
 foreach ($n in @(
     'Tabs','SysInfo','GpuLine','BtnQuick','RamText','RamBar','RamSub','CpuText','CpuBar','PlanText','DeltaText','DeltaSub',

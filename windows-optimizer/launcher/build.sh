@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds WinOptimizer.exe with the icon and metadata. Needs: apt-get install mono-mcs mono-devel
+# Builds WinOptimizer.exe (icon + admin manifest + embedded script/icon).
+# Needs: apt-get install mono-mcs mono-devel
 # On Windows: csc /target:winexe /win32icon:WinOptimizer.ico /resource:WinOptimizer.ps1,WinOptimizer.ps1 /resource:WinOptimizer.ico,WinOptimizer.ico /r:System.Windows.Forms.dll /out:WinOptimizer.exe launcher\Launcher.cs
 set -euo pipefail
 cd "$(dirname "$0")/.."
