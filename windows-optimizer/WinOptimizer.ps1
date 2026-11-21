@@ -26,7 +26,7 @@ $isSta     = [Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA'
 
 if (-not $isAdmin -or $isCore -or -not $isSta) {
     # Always run under Windows PowerShell 5.1 (needed for WPF + Checkpoint-Computer), elevated, STA.
-    $argList = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`""
+    $argList = "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$PSCommandPath`""
     try {
         Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList $argList -Verb RunAs | Out-Null
     } catch {
@@ -1227,33 +1227,41 @@ $RemovalJob = {
 # ---------------------------------------------------------------------------
 # 8. UI (WPF)
 # ---------------------------------------------------------------------------
-[xml]$xaml = @'
+$xamlRaw = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="WinOptimizer" Width="1280" Height="830" MinWidth="1040" MinHeight="680"
-        WindowStartupLocation="CenterScreen" Background="#0B0E14" Foreground="#E6EAF2"
+        Title="WinOptimizer" Width="1260" Height="824" MinWidth="1040" MinHeight="660"
+        WindowStartupLocation="CenterScreen" Foreground="#1C2A3A"
         FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13"
         UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display">
+  <Window.Background>
+    <LinearGradientBrush StartPoint="0,0" EndPoint="0.35,1">
+      <GradientStop Color="#E6F0FC" Offset="0"/>
+      <GradientStop Color="#F4F8FD" Offset="0.5"/>
+      <GradientStop Color="#FFFFFF" Offset="1"/>
+    </LinearGradientBrush>
+  </Window.Background>
   <Window.Resources>
     <FontFamily x:Key="Icons">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
-    <LinearGradientBrush x:Key="AccentGrad" StartPoint="0,0" EndPoint="1,1">
-      <GradientStop Color="#4F8CFF" Offset="0"/>
-      <GradientStop Color="#8B5CF6" Offset="1"/>
-    </LinearGradientBrush>
-    <LinearGradientBrush x:Key="RamGrad" StartPoint="0,0" EndPoint="1,0">
-      <GradientStop Color="#38BDF8" Offset="0"/>
-      <GradientStop Color="#4F8CFF" Offset="1"/>
-    </LinearGradientBrush>
-    <LinearGradientBrush x:Key="CpuGrad" StartPoint="0,0" EndPoint="1,0">
-      <GradientStop Color="#A78BFA" Offset="0"/>
-      <GradientStop Color="#EC4899" Offset="1"/>
+    <SolidColorBrush x:Key="Accent" Color="__ACCENT__"/>
+    <SolidColorBrush x:Key="AccentDark" Color="__ACCENTDARK__"/>
+    <SolidColorBrush x:Key="AccentLight" Color="__ACCENTLIGHT__"/>
+    <SolidColorBrush x:Key="Ink" Color="#1C2A3A"/>
+    <SolidColorBrush x:Key="Muted" Color="#64748B"/>
+    <SolidColorBrush x:Key="Faint" Color="#93A3B6"/>
+    <SolidColorBrush x:Key="CardBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="CardBorder" Color="#E4EBF4"/>
+
+    <LinearGradientBrush x:Key="HeroGrad" StartPoint="0,0" EndPoint="1,1">
+      <GradientStop Color="#EAF3FF" Offset="0"/>
+      <GradientStop Color="#F7FBFF" Offset="1"/>
     </LinearGradientBrush>
 
     <!-- Buttons -->
     <Style x:Key="Btn" TargetType="Button">
-      <Setter Property="Foreground" Value="#E6EAF2"/>
-      <Setter Property="Background" Value="#171D2A"/>
-      <Setter Property="BorderBrush" Value="#283246"/>
+      <Setter Property="Foreground" Value="#243244"/>
+      <Setter Property="Background" Value="#FFFFFF"/>
+      <Setter Property="BorderBrush" Value="#D4DEEB"/>
       <Setter Property="Padding" Value="14,8"/>
       <Setter Property="Margin" Value="0,0,8,8"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
@@ -1266,45 +1274,79 @@ $RemovalJob = {
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.85"/></Trigger>
-              <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.7"/></Trigger>
-              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.35"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#F1F6FC"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Background" Value="#E6EEF8"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.4"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
     </Style>
     <Style x:Key="PrimaryBtn" TargetType="Button" BasedOn="{StaticResource Btn}">
-      <Setter Property="Background" Value="{StaticResource AccentGrad}"/>
+      <Setter Property="Background" Value="{StaticResource Accent}"/>
       <Setter Property="BorderBrush" Value="Transparent"/>
       <Setter Property="Foreground" Value="White"/>
-    </Style>
-    <Style x:Key="HeroBtn" TargetType="Button" BasedOn="{StaticResource Btn}">
-      <Setter Property="Background" Value="White"/>
-      <Setter Property="BorderBrush" Value="Transparent"/>
-      <Setter Property="Foreground" Value="#1E1B4B"/>
-      <Setter Property="Padding" Value="20,11"/>
-      <Setter Property="Margin" Value="0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="{StaticResource AccentDark}"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.4"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
 
-    <!-- Toggle switch (used for every tweak) -->
+    <!-- Search box with watermark + magnifier -->
+    <Style x:Key="Search" TargetType="TextBox">
+      <Setter Property="Foreground" Value="#1C2A3A"/>
+      <Setter Property="CaretBrush" Value="#1C2A3A"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border Background="#FFFFFF" BorderBrush="#D4DEEB" BorderThickness="1" CornerRadius="8" Padding="10,7">
+              <DockPanel>
+                <TextBlock Text="&#xE721;" FontFamily="{StaticResource Icons}" Foreground="#9AA7B8" FontSize="13"
+                           DockPanel.Dock="Left" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                <Grid>
+                  <TextBlock x:Name="wm" Text="{TemplateBinding Tag}" Foreground="#9AA7B8" VerticalAlignment="Center" Visibility="Collapsed"/>
+                  <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center"/>
+                </Grid>
+              </DockPanel>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="Text" Value=""><Setter TargetName="wm" Property="Visibility" Value="Visible"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Toggle switch -->
     <Style x:Key="Switch" TargetType="CheckBox">
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="CheckBox">
             <Grid Background="Transparent">
-              <Border x:Name="Track" Width="46" Height="24" CornerRadius="12" Background="#202838" BorderBrush="#36425A" BorderThickness="1"/>
-              <Ellipse x:Name="Knob" Width="16" Height="16" Fill="#8C96A8" HorizontalAlignment="Left" Margin="5,0,0,0"/>
+              <Border x:Name="Track" Width="46" Height="24" CornerRadius="12" Background="#D9E2EE" BorderBrush="#C4D1E2" BorderThickness="1"/>
+              <Ellipse x:Name="Knob" Width="16" Height="16" Fill="#FFFFFF" HorizontalAlignment="Left" Margin="5,0,0,0">
+                <Ellipse.Effect><DropShadowEffect BlurRadius="4" ShadowDepth="0.5" Opacity="0.3" Color="#4A5A70"/></Ellipse.Effect>
+              </Ellipse>
             </Grid>
             <ControlTemplate.Triggers>
               <Trigger Property="IsChecked" Value="True">
-                <Setter TargetName="Track" Property="Background" Value="{StaticResource AccentGrad}"/>
+                <Setter TargetName="Track" Property="Background" Value="{StaticResource Accent}"/>
                 <Setter TargetName="Track" Property="BorderBrush" Value="Transparent"/>
-                <Setter TargetName="Knob" Property="Fill" Value="White"/>
                 <Setter TargetName="Knob" Property="Margin" Value="25,0,0,0"/>
               </Trigger>
-              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.3"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
@@ -1313,18 +1355,13 @@ $RemovalJob = {
 
     <!-- Slim scrollbars -->
     <Style TargetType="ScrollBar">
-      <Setter Property="Width" Value="10"/>
-      <Setter Property="MinWidth" Value="10"/>
+      <Setter Property="Width" Value="10"/><Setter Property="MinWidth" Value="10"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="ScrollBar">
             <Track x:Name="PART_Track" Orientation="Vertical" IsDirectionReversed="True" Width="6" HorizontalAlignment="Center">
               <Track.Thumb>
-                <Thumb>
-                  <Thumb.Template>
-                    <ControlTemplate TargetType="Thumb"><Border Background="#2A3446" CornerRadius="3"/></ControlTemplate>
-                  </Thumb.Template>
-                </Thumb>
+                <Thumb><Thumb.Template><ControlTemplate TargetType="Thumb"><Border Background="#C2D0E0" CornerRadius="3"/></ControlTemplate></Thumb.Template></Thumb>
               </Track.Thumb>
             </Track>
           </ControlTemplate>
@@ -1332,21 +1369,12 @@ $RemovalJob = {
       </Setter>
       <Style.Triggers>
         <Trigger Property="Orientation" Value="Horizontal">
-          <Setter Property="Width" Value="Auto"/>
-          <Setter Property="MinWidth" Value="0"/>
-          <Setter Property="Height" Value="10"/>
-          <Setter Property="MinHeight" Value="10"/>
+          <Setter Property="Width" Value="Auto"/><Setter Property="MinWidth" Value="0"/><Setter Property="Height" Value="10"/><Setter Property="MinHeight" Value="10"/>
           <Setter Property="Template">
             <Setter.Value>
               <ControlTemplate TargetType="ScrollBar">
                 <Track x:Name="PART_Track" Orientation="Horizontal" Height="6" VerticalAlignment="Center">
-                  <Track.Thumb>
-                    <Thumb>
-                      <Thumb.Template>
-                        <ControlTemplate TargetType="Thumb"><Border Background="#2A3446" CornerRadius="3"/></ControlTemplate>
-                      </Thumb.Template>
-                    </Thumb>
-                  </Track.Thumb>
+                  <Track.Thumb><Thumb><Thumb.Template><ControlTemplate TargetType="Thumb"><Border Background="#C2D0E0" CornerRadius="3"/></ControlTemplate></Thumb.Template></Thumb></Track.Thumb>
                 </Track>
               </ControlTemplate>
             </Setter.Value>
@@ -1355,15 +1383,13 @@ $RemovalJob = {
       </Style.Triggers>
     </Style>
 
-    <!-- Rounded meters -->
     <Style x:Key="Meter" TargetType="ProgressBar">
-      <Setter Property="Height" Value="8"/>
-      <Setter Property="Maximum" Value="100"/>
+      <Setter Property="Height" Value="8"/><Setter Property="Maximum" Value="100"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="ProgressBar">
             <Grid>
-              <Border x:Name="PART_Track" Background="#1C2331" CornerRadius="4"/>
+              <Border x:Name="PART_Track" Background="#E8EEF6" CornerRadius="4"/>
               <Border x:Name="PART_Indicator" Background="{TemplateBinding Foreground}" CornerRadius="4" HorizontalAlignment="Left"/>
             </Grid>
           </ControlTemplate>
@@ -1371,9 +1397,9 @@ $RemovalJob = {
       </Setter>
     </Style>
 
-    <!-- Sidebar navigation -->
+    <!-- Sidebar nav -->
     <Style TargetType="TabItem">
-      <Setter Property="Foreground" Value="#8C96A8"/>
+      <Setter Property="Foreground" Value="#5A6A7E"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template">
         <Setter.Value>
@@ -1382,18 +1408,19 @@ $RemovalJob = {
               <Border x:Name="bd" Background="Transparent" CornerRadius="8" Padding="14,10">
                 <ContentPresenter ContentSource="Header"/>
               </Border>
-              <Border x:Name="bar" Width="3" CornerRadius="2" HorizontalAlignment="Left" Margin="0,10"
-                      Background="{StaticResource AccentGrad}" Visibility="Collapsed"/>
+              <Border x:Name="bar" Width="3" CornerRadius="2" HorizontalAlignment="Left" Margin="0,9"
+                      Background="{StaticResource Accent}" Visibility="Collapsed"/>
             </Grid>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="bd" Property="Background" Value="#141A26"/>
-                <Setter Property="Foreground" Value="#E6EAF2"/>
+                <Setter TargetName="bd" Property="Background" Value="#EAF1FA"/>
+                <Setter Property="Foreground" Value="#1C2A3A"/>
               </Trigger>
               <Trigger Property="IsSelected" Value="True">
-                <Setter TargetName="bd" Property="Background" Value="#1A2233"/>
+                <Setter TargetName="bd" Property="Background" Value="{StaticResource AccentLight}"/>
                 <Setter TargetName="bar" Property="Visibility" Value="Visible"/>
-                <Setter Property="Foreground" Value="White"/>
+                <Setter Property="Foreground" Value="{StaticResource AccentDark}"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -1402,50 +1429,37 @@ $RemovalJob = {
     </Style>
 
     <Style x:Key="Card" TargetType="Border">
-      <Setter Property="Background" Value="#121722"/>
-      <Setter Property="BorderBrush" Value="#1F2735"/>
+      <Setter Property="Background" Value="#FFFFFF"/>
+      <Setter Property="BorderBrush" Value="#E4EBF4"/>
       <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="CornerRadius" Value="14"/>
-      <Style.Triggers>
-        <Trigger Property="IsMouseOver" Value="True"><Setter Property="BorderBrush" Value="#33405A"/></Trigger>
-      </Style.Triggers>
+      <Setter Property="CornerRadius" Value="12"/>
+      <Setter Property="Effect"><Setter.Value><DropShadowEffect BlurRadius="14" ShadowDepth="2" Opacity="0.07" Color="#2B4A73"/></Setter.Value></Setter>
     </Style>
 
     <Style x:Key="PageTitle" TargetType="TextBlock">
-      <Setter Property="FontSize" Value="28"/>
-      <Setter Property="FontWeight" Value="SemiBold"/>
-      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="FontSize" Value="27"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="#152235"/>
     </Style>
     <Style x:Key="PageSub" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="#8C96A8"/>
-      <Setter Property="TextWrapping" Value="Wrap"/>
-      <Setter Property="MaxWidth" Value="860"/>
-      <Setter Property="HorizontalAlignment" Value="Left"/>
-      <Setter Property="LineHeight" Value="20"/>
-      <Setter Property="Margin" Value="0,6,0,16"/>
+      <Setter Property="Foreground" Value="#64748B"/><Setter Property="TextWrapping" Value="Wrap"/>
+      <Setter Property="MaxWidth" Value="880"/><Setter Property="HorizontalAlignment" Value="Left"/>
+      <Setter Property="LineHeight" Value="20"/><Setter Property="Margin" Value="0,6,0,14"/>
     </Style>
     <Style x:Key="StatLabel" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="#8C96A8"/>
-      <Setter Property="FontSize" Value="11"/>
-      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="Foreground" Value="#7686A0"/><Setter Property="FontSize" Value="11"/><Setter Property="FontWeight" Value="Bold"/>
     </Style>
 
     <Style TargetType="GridViewColumnHeader">
-      <Setter Property="Foreground" Value="#6B7588"/>
-      <Setter Property="FontSize" Value="11"/>
-      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="Foreground" Value="#8094AC"/><Setter Property="FontSize" Value="11"/><Setter Property="FontWeight" Value="Bold"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="GridViewColumnHeader">
-            <Border Background="Transparent" BorderBrush="#1F2735" BorderThickness="0,0,0,1" Padding="8,0,8,8">
-              <ContentPresenter HorizontalAlignment="Left"/>
-            </Border>
+            <Border Background="Transparent" BorderBrush="#EAEFF6" BorderThickness="0,0,0,1" Padding="8,0,8,8"><ContentPresenter HorizontalAlignment="Left"/></Border>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
     </Style>
     <Style TargetType="ListViewItem">
-      <Setter Property="Foreground" Value="#E6EAF2"/>
+      <Setter Property="Foreground" Value="#243244"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="ListViewItem">
@@ -1453,26 +1467,23 @@ $RemovalJob = {
               <GridViewRowPresenter Columns="{TemplateBinding GridView.ColumnCollection}" Content="{TemplateBinding Content}"/>
             </Border>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#171E2C"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#F2F7FC"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
     </Style>
     <Style TargetType="ListBoxItem">
-      <Setter Property="Foreground" Value="#E6EAF2"/>
-      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Foreground" Value="#243244"/><Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="ListBoxItem">
-            <Border x:Name="b" Background="#121722" BorderBrush="#1F2735" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="0,0,0,8">
-              <ContentPresenter/>
-            </Border>
+            <Border x:Name="b" Background="#FFFFFF" BorderBrush="#E4EBF4" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="0,0,0,8"><ContentPresenter/></Border>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#33405A"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#C2D4EA"/></Trigger>
               <Trigger Property="IsSelected" Value="True">
-                <Setter TargetName="b" Property="BorderBrush" Value="#4F8CFF"/>
-                <Setter TargetName="b" Property="Background" Value="#16203A"/>
+                <Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                <Setter TargetName="b" Property="Background" Value="{StaticResource AccentLight}"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -1484,31 +1495,24 @@ $RemovalJob = {
     <DataTemplate x:Key="TweakTemplate">
       <Border Style="{StaticResource Card}" Padding="20,16" Margin="0,0,14,10">
         <Grid>
-          <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="*"/>
-            <ColumnDefinition Width="Auto"/>
-          </Grid.ColumnDefinitions>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
           <StackPanel>
             <WrapPanel>
-              <TextBlock Text="{Binding Name}" FontSize="15" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center" Margin="0,0,10,0"/>
+              <TextBlock Text="{Binding Name}" FontSize="15" FontWeight="SemiBold" Foreground="#152235" VerticalAlignment="Center" Margin="0,0,10,0"/>
               <Border Background="{Binding RiskBg}" CornerRadius="10" Padding="9,2" VerticalAlignment="Center">
                 <TextBlock Text="{Binding Risk}" Foreground="{Binding RiskColor}" FontSize="11" FontWeight="Bold"/>
               </Border>
             </WrapPanel>
-            <TextBlock Text="{Binding Description}" TextWrapping="Wrap" Foreground="#9AA4B6" Margin="0,7,0,0" LineHeight="19"/>
+            <TextBlock Text="{Binding Description}" TextWrapping="Wrap" Foreground="#5A6A7E" Margin="0,7,0,0" LineHeight="19"/>
             <Grid Margin="0,9,0,0">
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-              </Grid.ColumnDefinitions>
-              <TextBlock Text="&#xE946;" FontFamily="{StaticResource Icons}" Foreground="#B79CFF" FontSize="12" Margin="0,3,8,0"/>
-              <TextBlock Grid.Column="1" Text="{Binding Tradeoff}" TextWrapping="Wrap" Foreground="#B79CFF" FontSize="12" LineHeight="18"/>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <TextBlock Text="&#xE946;" FontFamily="{StaticResource Icons}" Foreground="#8A79D6" FontSize="12" Margin="0,3,8,0"/>
+              <TextBlock Grid.Column="1" Text="{Binding Tradeoff}" TextWrapping="Wrap" Foreground="#6B5FB0" FontSize="12" LineHeight="18"/>
             </Grid>
           </StackPanel>
           <StackPanel Grid.Column="1" Margin="28,0,0,0" MinWidth="130">
             <CheckBox Style="{StaticResource Switch}" HorizontalAlignment="Right"
-                      IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                      IsEnabled="{Binding IsAvailable}"/>
+                      IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding IsAvailable}"/>
             <TextBlock Text="{Binding Status}" Foreground="{Binding StatusColor}" FontSize="11" Margin="0,10,0,0"
                        HorizontalAlignment="Right" TextAlignment="Right" TextWrapping="Wrap" MaxWidth="170"/>
           </StackPanel>
@@ -1518,90 +1522,69 @@ $RemovalJob = {
   </Window.Resources>
 
   <Grid>
-    <Grid.RowDefinitions>
-      <RowDefinition Height="*"/>
-      <RowDefinition Height="Auto"/>
-    </Grid.RowDefinitions>
+    <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
 
     <TabControl x:Name="Tabs" TabStripPlacement="Left" BorderThickness="0" Padding="0" Background="Transparent">
       <TabControl.Template>
         <ControlTemplate TargetType="TabControl">
           <Grid>
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="250"/>
-              <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <Border Background="#0E121A" BorderBrush="#1A2130" BorderThickness="0,0,1,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="248"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Border Background="#F6F9FD" BorderBrush="#E4EBF4" BorderThickness="0,0,1,0">
               <DockPanel>
-                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="24,28,12,28">
-                  <Border Width="40" Height="40" CornerRadius="12" Background="{StaticResource AccentGrad}">
-                    <TextBlock Text="&#xE945;" FontFamily="{StaticResource Icons}" Foreground="White" FontSize="19"
-                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="22,26,12,26">
+                  <Border Width="42" Height="42" CornerRadius="11">
+                    <Border.Background>
+                      <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                        <GradientStop Color="#3896E8" Offset="0"/><GradientStop Color="#0A6ED2" Offset="1"/>
+                      </LinearGradientBrush>
+                    </Border.Background>
+                    <TextBlock Text="&#xEC4A;" FontFamily="{StaticResource Icons}" Foreground="White" FontSize="21" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                   </Border>
                   <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
-                    <TextBlock Text="WinOptimizer" FontSize="18" FontWeight="Bold" Foreground="White"/>
-                    <TextBlock Text="Safe, reversible tuning" FontSize="11" Foreground="#6B7588"/>
+                    <TextBlock Text="WinOptimizer" FontSize="18" FontWeight="Bold" Foreground="#152235"/>
+                    <TextBlock Text="Safe, reversible tuning" FontSize="11" Foreground="#8094AC"/>
                   </StackPanel>
                 </StackPanel>
-                <Border DockPanel.Dock="Bottom" Margin="18,0,18,20" Padding="14,12" CornerRadius="12" Background="#121722" BorderBrush="#1F2735" BorderThickness="1">
+                <Border DockPanel.Dock="Bottom" Margin="16,0,16,18" Padding="14,12" CornerRadius="10" Background="#ECFDF3" BorderBrush="#CBEFD8" BorderThickness="1">
                   <Grid>
-                    <Grid.ColumnDefinitions>
-                      <ColumnDefinition Width="Auto"/>
-                      <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Text="&#xEA18;" FontFamily="{StaticResource Icons}" Foreground="#34D399" FontSize="16" Margin="0,1,10,0"/>
-                    <TextBlock Grid.Column="1" TextWrapping="Wrap" Foreground="#8C96A8" FontSize="11" LineHeight="16"
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <TextBlock Text="&#xEA18;" FontFamily="{StaticResource Icons}" Foreground="#16A34A" FontSize="16" Margin="0,1,10,0"/>
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap" Foreground="#3F7A54" FontSize="11" LineHeight="16"
                                Text="Every setting change is backed up and can be undone from Backup &amp; Restore."/>
                   </Grid>
                 </Border>
                 <StackPanel IsItemsHost="True"/>
               </DockPanel>
             </Border>
-            <ContentPresenter Grid.Column="1" ContentSource="SelectedContent" Margin="34,28,20,14"/>
+            <ContentPresenter Grid.Column="1" ContentSource="SelectedContent" Margin="32,26,20,14"/>
           </Grid>
         </ControlTemplate>
       </TabControl.Template>
 
-      <!-- ================= DASHBOARD ================= -->
+      <!-- DASHBOARD -->
       <TabItem>
-        <TabItem.Header>
-          <StackPanel Orientation="Horizontal">
-            <TextBlock Text="&#xE9D2;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
-            <TextBlock Text="Dashboard" FontSize="14" VerticalAlignment="Center"/>
-          </StackPanel>
-        </TabItem.Header>
+        <TabItem.Header><StackPanel Orientation="Horizontal">
+          <TextBlock Text="&#xE80F;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+          <TextBlock Text="Dashboard" FontSize="14" VerticalAlignment="Center"/></StackPanel></TabItem.Header>
         <Grid Margin="0,0,14,0">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-          </Grid.RowDefinitions>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
 
-          <Border CornerRadius="18" Padding="28,24" Margin="0,0,0,18">
-            <Border.Background>
-              <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                <GradientStop Color="#1D3B8B" Offset="0"/>
-                <GradientStop Color="#4C1D95" Offset="1"/>
-              </LinearGradientBrush>
-            </Border.Background>
+          <Border CornerRadius="16" Padding="28,24" Margin="0,0,0,18" Background="{StaticResource HeroGrad}" BorderBrush="#DCEAFB" BorderThickness="1">
             <Grid>
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-              </Grid.ColumnDefinitions>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
               <StackPanel>
-                <TextBlock Text="Your PC at a glance" FontSize="28" FontWeight="SemiBold" Foreground="White"/>
-                <TextBlock x:Name="SysInfo" Foreground="#C7D2FE" Margin="0,8,0,0" TextWrapping="Wrap" Text="Loading..."/>
-                <TextBlock x:Name="GpuLine" Foreground="#A5B4FC" FontSize="12" Margin="0,3,0,0" TextWrapping="Wrap"/>
+                <TextBlock Text="Your PC at a glance" FontSize="27" FontWeight="SemiBold" Foreground="#152235"/>
+                <TextBlock x:Name="SysInfo" Foreground="#4C6180" Margin="0,8,0,0" TextWrapping="Wrap" Text="Loading..."/>
+                <TextBlock x:Name="GpuLine" Foreground="#6B7E98" FontSize="12" Margin="0,3,0,0" TextWrapping="Wrap"/>
               </StackPanel>
               <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="20,0,0,0">
-                <Button x:Name="BtnQuick" Style="{StaticResource HeroBtn}">
+                <Button x:Name="BtnQuick" Style="{StaticResource PrimaryBtn}" Margin="0" Padding="20,11">
                   <StackPanel Orientation="Horizontal">
                     <TextBlock Text="&#xE945;" FontFamily="{StaticResource Icons}" Margin="0,1,9,0"/>
                     <TextBlock Text="Quick optimize"/>
                   </StackPanel>
                 </Button>
-                <TextBlock Text="Safe, recommended settings only" Foreground="#C7D2FE" FontSize="11" Margin="0,8,0,0" HorizontalAlignment="Center"/>
+                <TextBlock Text="Safe, recommended settings only" Foreground="#6B7E98" FontSize="11" Margin="0,8,0,0" HorizontalAlignment="Center"/>
               </StackPanel>
             </Grid>
           </Border>
@@ -1610,33 +1593,33 @@ $RemovalJob = {
             <Border Style="{StaticResource Card}" Padding="22,18" Margin="0,0,9,0">
               <StackPanel>
                 <StackPanel Orientation="Horizontal">
-                  <TextBlock Text="&#xE945;" FontFamily="{StaticResource Icons}" Foreground="#38BDF8" Margin="0,0,8,0"/>
+                  <TextBlock Text="&#xE964;" FontFamily="{StaticResource Icons}" Foreground="{StaticResource Accent}" Margin="0,0,8,0"/>
                   <TextBlock Text="MEMORY IN USE" Style="{StaticResource StatLabel}"/>
                 </StackPanel>
-                <TextBlock x:Name="RamText" FontSize="30" FontWeight="SemiBold" Foreground="White" Margin="0,10,0,10" Text="-"/>
-                <ProgressBar x:Name="RamBar" Style="{StaticResource Meter}" Foreground="{StaticResource RamGrad}"/>
-                <TextBlock x:Name="RamSub" Foreground="#8C96A8" FontSize="12" Margin="0,10,0,0"/>
+                <TextBlock x:Name="RamText" FontSize="29" FontWeight="SemiBold" Foreground="#152235" Margin="0,10,0,10" Text="-"/>
+                <ProgressBar x:Name="RamBar" Style="{StaticResource Meter}" Foreground="{StaticResource Accent}"/>
+                <TextBlock x:Name="RamSub" Foreground="#7686A0" FontSize="12" Margin="0,10,0,0"/>
               </StackPanel>
             </Border>
             <Border Style="{StaticResource Card}" Padding="22,18" Margin="9,0,9,0">
               <StackPanel>
                 <StackPanel Orientation="Horizontal">
-                  <TextBlock Text="&#xEC4A;" FontFamily="{StaticResource Icons}" Foreground="#A78BFA" Margin="0,0,8,0"/>
+                  <TextBlock Text="&#xEC4A;" FontFamily="{StaticResource Icons}" Foreground="#0EA5A5" Margin="0,0,8,0"/>
                   <TextBlock Text="CPU LOAD" Style="{StaticResource StatLabel}"/>
                 </StackPanel>
-                <TextBlock x:Name="CpuText" FontSize="30" FontWeight="SemiBold" Foreground="White" Margin="0,10,0,10" Text="-"/>
-                <ProgressBar x:Name="CpuBar" Style="{StaticResource Meter}" Foreground="{StaticResource CpuGrad}"/>
-                <TextBlock x:Name="PlanText" Foreground="#8C96A8" FontSize="12" Margin="0,10,0,0"/>
+                <TextBlock x:Name="CpuText" FontSize="29" FontWeight="SemiBold" Foreground="#152235" Margin="0,10,0,10" Text="-"/>
+                <ProgressBar x:Name="CpuBar" Style="{StaticResource Meter}" Foreground="#0EA5A5"/>
+                <TextBlock x:Name="PlanText" Foreground="#7686A0" FontSize="12" Margin="0,10,0,0"/>
               </StackPanel>
             </Border>
             <Border Style="{StaticResource Card}" Padding="22,18" Margin="9,0,0,0">
               <StackPanel>
                 <StackPanel Orientation="Horizontal">
-                  <TextBlock Text="&#xE81C;" FontFamily="{StaticResource Icons}" Foreground="#34D399" Margin="0,0,8,0"/>
+                  <TextBlock Text="&#xE81C;" FontFamily="{StaticResource Icons}" Foreground="#16A34A" Margin="0,0,8,0"/>
                   <TextBlock Text="SINCE LAST APPLY" Style="{StaticResource StatLabel}"/>
                 </StackPanel>
-                <TextBlock x:Name="DeltaText" FontSize="30" FontWeight="SemiBold" Foreground="#34D399" Margin="0,10,0,6" Text="-"/>
-                <TextBlock x:Name="DeltaSub" Foreground="#8C96A8" FontSize="12" TextWrapping="Wrap" LineHeight="17"
+                <TextBlock x:Name="DeltaText" FontSize="29" FontWeight="SemiBold" Foreground="#16A34A" Margin="0,10,0,6" Text="-"/>
+                <TextBlock x:Name="DeltaSub" Foreground="#7686A0" FontSize="12" TextWrapping="Wrap" LineHeight="17"
                            Text="Apply changes, then restart, to see the real difference."/>
               </StackPanel>
             </Border>
@@ -1646,18 +1629,15 @@ $RemovalJob = {
             <DockPanel>
               <DockPanel DockPanel.Dock="Top" Margin="0,0,0,14">
                 <Button x:Name="BtnRefreshProc" DockPanel.Dock="Right" Style="{StaticResource Btn}" Margin="0" VerticalAlignment="Center">
-                  <StackPanel Orientation="Horizontal">
-                    <TextBlock Text="&#xE72C;" FontFamily="{StaticResource Icons}" Margin="0,1,8,0"/>
-                    <TextBlock Text="Refresh"/>
-                  </StackPanel>
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE72C;" FontFamily="{StaticResource Icons}" Margin="0,1,8,0"/><TextBlock Text="Refresh"/></StackPanel>
                 </Button>
                 <StackPanel VerticalAlignment="Center">
-                  <TextBlock Text="Top processes by memory" FontSize="16" FontWeight="SemiBold" Foreground="White"/>
-                  <TextBlock x:Name="ProcNote" Foreground="#6B7588" FontSize="11" Margin="0,3,0,0"
+                  <TextBlock Text="Top processes by memory" FontSize="16" FontWeight="SemiBold" Foreground="#152235"/>
+                  <TextBlock x:Name="ProcNote" Foreground="#8094AC" FontSize="11" Margin="0,3,0,0"
                              Text="Memory = private working set, the same figure as Task Manager's Memory column."/>
                 </StackPanel>
               </DockPanel>
-              <ListView x:Name="ProcList" Background="Transparent" BorderThickness="0" Foreground="#E6EAF2"
+              <ListView x:Name="ProcList" Background="Transparent" BorderThickness="0" Foreground="#243244"
                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                         VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
                 <ListView.View>
@@ -1674,77 +1654,67 @@ $RemovalJob = {
         </Grid>
       </TabItem>
 
-      <!-- ================= MEMORY ================= -->
+      <!-- MEMORY -->
       <TabItem>
-        <TabItem.Header>
-          <StackPanel Orientation="Horizontal">
-            <TextBlock Text="&#xE945;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
-            <TextBlock Text="Memory &amp; RAM" FontSize="14" VerticalAlignment="Center"/>
-          </StackPanel>
-        </TabItem.Header>
+        <TabItem.Header><StackPanel Orientation="Horizontal">
+          <TextBlock Text="&#xE964;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+          <TextBlock Text="Memory &amp; RAM" FontSize="14" VerticalAlignment="Center"/></StackPanel></TabItem.Header>
         <DockPanel>
           <StackPanel DockPanel.Dock="Top">
             <TextBlock Text="Memory &amp; RAM" Style="{StaticResource PageTitle}"/>
             <TextBlock Style="{StaticResource PageSub}"
                        Text="Background services and features Windows runs by default. Green = safe for almost everyone. Yellow = read the trade-off first. Settings are only changed, never deleted, so all of them can be undone."/>
-            <WrapPanel>
-              <Button x:Name="BtnMemRec" Content="Select recommended" Style="{StaticResource Btn}"/>
-              <Button x:Name="BtnMemNone" Content="Select none" Style="{StaticResource Btn}"/>
-              <Button x:Name="BtnTrim" Content="Trim RAM now (temporary)" Style="{StaticResource Btn}"
-                      ToolTip="Asks every process to release unused pages. Windows pages memory back in as apps need it, so the effect is short-lived."/>
-            </WrapPanel>
+            <DockPanel Margin="0,0,0,2">
+              <TextBox x:Name="MemSearch" DockPanel.Dock="Right" Style="{StaticResource Search}" Width="240" Height="34" Margin="8,0,0,8" Tag="Search memory settings..."/>
+              <WrapPanel>
+                <Button x:Name="BtnMemRec" Content="Select recommended" Style="{StaticResource Btn}"/>
+                <Button x:Name="BtnMemNone" Content="Select none" Style="{StaticResource Btn}"/>
+                <Button x:Name="BtnTrim" Content="Trim RAM now (temporary)" Style="{StaticResource Btn}"
+                        ToolTip="Asks every process to release unused pages. Windows pages memory back in as apps need it, so the effect is short-lived."/>
+              </WrapPanel>
+            </DockPanel>
           </StackPanel>
-          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0">
-            <ItemsControl x:Name="MemList" ItemTemplate="{StaticResource TweakTemplate}"/>
-          </ScrollViewer>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0"><ItemsControl x:Name="MemList" ItemTemplate="{StaticResource TweakTemplate}"/></ScrollViewer>
         </DockPanel>
       </TabItem>
 
-      <!-- ================= BLOATWARE ================= -->
+      <!-- BLOATWARE -->
       <TabItem>
-        <TabItem.Header>
-          <StackPanel Orientation="Horizontal">
-            <TextBlock Text="&#xE74D;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
-            <TextBlock Text="Remove bloatware" FontSize="14" VerticalAlignment="Center"/>
-          </StackPanel>
-        </TabItem.Header>
+        <TabItem.Header><StackPanel Orientation="Horizontal">
+          <TextBlock Text="&#xE74D;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+          <TextBlock Text="Remove bloatware" FontSize="14" VerticalAlignment="Center"/></StackPanel></TabItem.Header>
         <DockPanel>
           <StackPanel DockPanel.Dock="Top">
             <TextBlock Text="Remove bloatware" Style="{StaticResource PageTitle}"/>
             <TextBlock Style="{StaticResource PageSub}"
                        Text="Preinstalled apps found on this PC. Only apps on a curated list are shown - the Store, app installer, security, drivers and system components can never be removed here. Nothing is selected until you choose."/>
-            <Border Background="#1F1A0B" BorderBrush="#4A3B12" BorderThickness="1" CornerRadius="10" Padding="14,10" Margin="0,0,0,14" MaxWidth="860" HorizontalAlignment="Left">
+            <Border Background="#FFF8E7" BorderBrush="#F4E0A8" BorderThickness="1" CornerRadius="10" Padding="14,10" Margin="0,0,0,14" MaxWidth="880" HorizontalAlignment="Left">
               <Grid>
-                <Grid.ColumnDefinitions>
-                  <ColumnDefinition Width="Auto"/>
-                  <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Text="&#xE7BA;" FontFamily="{StaticResource Icons}" Foreground="#FBBF24" FontSize="15" Margin="0,1,10,0"/>
-                <TextBlock Grid.Column="1" TextWrapping="Wrap" Foreground="#E9D9A6" FontSize="12" LineHeight="18"
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <TextBlock Text="&#xE7BA;" FontFamily="{StaticResource Icons}" Foreground="#C77F0A" FontSize="15" Margin="0,1,10,0"/>
+                <TextBlock Grid.Column="1" TextWrapping="Wrap" Foreground="#8A6514" FontSize="12" LineHeight="18"
                            Text="Uninstalling removes the app for every user on this PC and stops Windows reinstalling it for new accounts. Unlike settings, an uninstall cannot be undone with one click - but every Store app can be reinstalled for free, and Backup &amp; Restore gives you a direct link to each one."/>
               </Grid>
             </Border>
-            <WrapPanel>
-              <Button x:Name="BtnBloatRec" Content="Select recommended" Style="{StaticResource Btn}"/>
-              <Button x:Name="BtnBloatNone" Content="Select none" Style="{StaticResource Btn}"/>
-              <Button x:Name="BtnBloatRescan" Style="{StaticResource Btn}">
-                <StackPanel Orientation="Horizontal">
-                  <TextBlock Text="&#xE72C;" FontFamily="{StaticResource Icons}" Margin="0,1,8,0"/>
-                  <TextBlock Text="Rescan"/>
-                </StackPanel>
-              </Button>
-              <TextBlock x:Name="BloatStatus" Foreground="#8C96A8" VerticalAlignment="Center" Margin="6,0,0,8" Text="Scanning installed apps..."/>
-            </WrapPanel>
+            <DockPanel Margin="0,0,0,2">
+              <TextBox x:Name="BloatSearch" DockPanel.Dock="Right" Style="{StaticResource Search}" Width="240" Height="34" Margin="8,0,0,8" Tag="Search apps..."/>
+              <WrapPanel>
+                <Button x:Name="BtnBloatRec" Content="Select recommended" Style="{StaticResource Btn}"/>
+                <Button x:Name="BtnBloatNone" Content="Select none" Style="{StaticResource Btn}"/>
+                <Button x:Name="BtnBloatRescan" Style="{StaticResource Btn}">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE72C;" FontFamily="{StaticResource Icons}" Margin="0,1,8,0"/><TextBlock Text="Rescan"/></StackPanel>
+                </Button>
+                <TextBlock x:Name="BloatStatus" Foreground="#64748B" VerticalAlignment="Center" Margin="6,0,0,8" Text="Scanning installed apps..."/>
+              </WrapPanel>
+            </DockPanel>
           </StackPanel>
           <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0">
             <ItemsControl x:Name="BloatList" ItemTemplate="{StaticResource TweakTemplate}">
               <ItemsControl.GroupStyle>
                 <GroupStyle>
-                  <GroupStyle.HeaderTemplate>
-                    <DataTemplate>
-                      <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="Bold" Foreground="#6B7588" Margin="2,10,0,10"/>
-                    </DataTemplate>
-                  </GroupStyle.HeaderTemplate>
+                  <GroupStyle.HeaderTemplate><DataTemplate>
+                    <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="Bold" Foreground="#8094AC" Margin="2,10,0,10"/>
+                  </DataTemplate></GroupStyle.HeaderTemplate>
                 </GroupStyle>
               </ItemsControl.GroupStyle>
             </ItemsControl>
@@ -1752,85 +1722,76 @@ $RemovalJob = {
         </DockPanel>
       </TabItem>
 
-      <!-- ================= STARTUP ================= -->
+      <!-- STARTUP -->
       <TabItem>
-        <TabItem.Header>
-          <StackPanel Orientation="Horizontal">
-            <TextBlock Text="&#xE7E8;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
-            <TextBlock Text="Startup apps" FontSize="14" VerticalAlignment="Center"/>
-          </StackPanel>
-        </TabItem.Header>
+        <TabItem.Header><StackPanel Orientation="Horizontal">
+          <TextBlock Text="&#xE7E8;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+          <TextBlock Text="Startup apps" FontSize="14" VerticalAlignment="Center"/></StackPanel></TabItem.Header>
         <DockPanel>
           <StackPanel DockPanel.Dock="Top">
             <TextBlock Text="Startup apps" Style="{StaticResource PageTitle}"/>
             <TextBlock Style="{StaticResource PageSub}"
                        Text="Programs that launch when you sign in - usually the biggest source of avoidable RAM use. Switching one on disables it at startup exactly like Task Manager does (nothing is deleted). Windows Security is hidden and never touched."/>
-            <WrapPanel>
-              <Button x:Name="BtnStartNone" Content="Select none" Style="{StaticResource Btn}"/>
-              <Button x:Name="BtnStartReload" Content="Reload list" Style="{StaticResource Btn}"/>
-            </WrapPanel>
+            <DockPanel Margin="0,0,0,2">
+              <TextBox x:Name="StartSearch" DockPanel.Dock="Right" Style="{StaticResource Search}" Width="240" Height="34" Margin="8,0,0,8" Tag="Search startup apps..."/>
+              <WrapPanel>
+                <Button x:Name="BtnStartNone" Content="Select none" Style="{StaticResource Btn}"/>
+                <Button x:Name="BtnStartReload" Content="Reload list" Style="{StaticResource Btn}"/>
+              </WrapPanel>
+            </DockPanel>
           </StackPanel>
-          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0">
-            <ItemsControl x:Name="StartList" ItemTemplate="{StaticResource TweakTemplate}"/>
-          </ScrollViewer>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0"><ItemsControl x:Name="StartList" ItemTemplate="{StaticResource TweakTemplate}"/></ScrollViewer>
         </DockPanel>
       </TabItem>
 
-      <!-- ================= CPU ================= -->
+      <!-- CPU -->
       <TabItem>
-        <TabItem.Header>
-          <StackPanel Orientation="Horizontal">
-            <TextBlock Text="&#xEC4A;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
-            <TextBlock Text="CPU" FontSize="14" VerticalAlignment="Center"/>
-          </StackPanel>
-        </TabItem.Header>
+        <TabItem.Header><StackPanel Orientation="Horizontal">
+          <TextBlock Text="&#xEC4A;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+          <TextBlock Text="CPU" FontSize="14" VerticalAlignment="Center"/></StackPanel></TabItem.Header>
         <DockPanel>
           <StackPanel DockPanel.Dock="Top">
             <TextBlock Text="CPU" Style="{StaticResource PageTitle}"/>
             <TextBlock Style="{StaticResource PageSub}"
                        Text="Scheduling and power settings that favour responsiveness and games. Expect smoother frame times and snappier input rather than much higher average FPS."/>
-            <WrapPanel>
-              <Button x:Name="BtnCpuRec" Content="Select recommended" Style="{StaticResource Btn}"/>
-              <Button x:Name="BtnCpuNone" Content="Select none" Style="{StaticResource Btn}"/>
-            </WrapPanel>
+            <DockPanel Margin="0,0,0,2">
+              <TextBox x:Name="CpuSearch" DockPanel.Dock="Right" Style="{StaticResource Search}" Width="240" Height="34" Margin="8,0,0,8" Tag="Search CPU settings..."/>
+              <WrapPanel>
+                <Button x:Name="BtnCpuRec" Content="Select recommended" Style="{StaticResource Btn}"/>
+                <Button x:Name="BtnCpuNone" Content="Select none" Style="{StaticResource Btn}"/>
+              </WrapPanel>
+            </DockPanel>
           </StackPanel>
-          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0">
-            <ItemsControl x:Name="CpuList" ItemTemplate="{StaticResource TweakTemplate}"/>
-          </ScrollViewer>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0"><ItemsControl x:Name="CpuList" ItemTemplate="{StaticResource TweakTemplate}"/></ScrollViewer>
         </DockPanel>
       </TabItem>
 
-      <!-- ================= GPU ================= -->
+      <!-- GPU -->
       <TabItem>
-        <TabItem.Header>
-          <StackPanel Orientation="Horizontal">
-            <TextBlock Text="&#xE7FC;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
-            <TextBlock Text="GPU" FontSize="14" VerticalAlignment="Center"/>
-          </StackPanel>
-        </TabItem.Header>
+        <TabItem.Header><StackPanel Orientation="Horizontal">
+          <TextBlock Text="&#xE7F4;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+          <TextBlock Text="GPU" FontSize="14" VerticalAlignment="Center"/></StackPanel></TabItem.Header>
         <DockPanel>
           <StackPanel DockPanel.Dock="Top">
             <TextBlock Text="GPU" Style="{StaticResource PageTitle}"/>
             <TextBlock x:Name="GpuInfo" Style="{StaticResource PageSub}"/>
-            <WrapPanel>
-              <Button x:Name="BtnGpuRec" Content="Select recommended" Style="{StaticResource Btn}"/>
-              <Button x:Name="BtnGpuNone" Content="Select none" Style="{StaticResource Btn}"/>
-            </WrapPanel>
+            <DockPanel Margin="0,0,0,2">
+              <TextBox x:Name="GpuSearch" DockPanel.Dock="Right" Style="{StaticResource Search}" Width="240" Height="34" Margin="8,0,0,8" Tag="Search GPU settings..."/>
+              <WrapPanel>
+                <Button x:Name="BtnGpuRec" Content="Select recommended" Style="{StaticResource Btn}"/>
+                <Button x:Name="BtnGpuNone" Content="Select none" Style="{StaticResource Btn}"/>
+              </WrapPanel>
+            </DockPanel>
           </StackPanel>
-          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0">
-            <ItemsControl x:Name="GpuList" ItemTemplate="{StaticResource TweakTemplate}"/>
-          </ScrollViewer>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0"><ItemsControl x:Name="GpuList" ItemTemplate="{StaticResource TweakTemplate}"/></ScrollViewer>
         </DockPanel>
       </TabItem>
 
-      <!-- ================= RESTORE ================= -->
+      <!-- RESTORE -->
       <TabItem>
-        <TabItem.Header>
-          <StackPanel Orientation="Horizontal">
-            <TextBlock Text="&#xE81C;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
-            <TextBlock Text="Backup &amp; Restore" FontSize="14" VerticalAlignment="Center"/>
-          </StackPanel>
-        </TabItem.Header>
+        <TabItem.Header><StackPanel Orientation="Horizontal">
+          <TextBlock Text="&#xE81C;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+          <TextBlock Text="Backup &amp; Restore" FontSize="14" VerticalAlignment="Center"/></StackPanel></TabItem.Header>
         <DockPanel Margin="0,0,14,0">
           <StackPanel DockPanel.Dock="Top">
             <TextBlock Text="Backup &amp; Restore" Style="{StaticResource PageTitle}"/>
@@ -1838,45 +1799,35 @@ $RemovalJob = {
                        Text="Every apply saves the previous value of everything it changed. Restoring puts those exact values back, and lists any removed apps with a direct link to reinstall them. For a full rollback you can also use the System Restore point created before applying."/>
             <WrapPanel>
               <Button x:Name="BtnRestore" Style="{StaticResource PrimaryBtn}">
-                <StackPanel Orientation="Horizontal">
-                  <TextBlock Text="&#xE777;" FontFamily="{StaticResource Icons}" Margin="0,1,8,0"/>
-                  <TextBlock Text="Restore selected backup"/>
-                </StackPanel>
+                <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE777;" FontFamily="{StaticResource Icons}" Margin="0,1,8,0"/><TextBlock Text="Restore selected backup"/></StackPanel>
               </Button>
               <Button x:Name="BtnRestorePoint" Content="Create restore point now" Style="{StaticResource Btn}"/>
               <Button x:Name="BtnOpenSysRestore" Content="Open System Restore" Style="{StaticResource Btn}"/>
               <Button x:Name="BtnOpenFolder" Content="Open backup folder" Style="{StaticResource Btn}"/>
             </WrapPanel>
           </StackPanel>
-          <ListBox x:Name="BackupList" Background="Transparent" BorderThickness="0" Margin="0,8,0,0"
-                   ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+          <ListBox x:Name="BackupList" Background="Transparent" BorderThickness="0" Margin="0,8,0,0" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
         </DockPanel>
       </TabItem>
     </TabControl>
 
-    <!-- ================= Bottom bar ================= -->
-    <Border Grid.Row="1" Background="#0E121A" BorderBrush="#1A2130" BorderThickness="0,1,0,0" Padding="24,12">
+    <!-- Bottom bar -->
+    <Border Grid.Row="1" Background="#F6F9FD" BorderBrush="#E4EBF4" BorderThickness="0,1,0,0" Padding="24,12">
       <Grid>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*"/>
-          <ColumnDefinition Width="Auto"/>
-        </Grid.ColumnDefinitions>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <DockPanel>
           <StackPanel x:Name="BusyPanel" DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6" Visibility="Collapsed">
-            <Ellipse Width="8" Height="8" Fill="#4F8CFF" VerticalAlignment="Center" Margin="0,0,8,0"/>
-            <TextBlock x:Name="BusyText" Foreground="#C7D2FE" FontWeight="SemiBold"/>
+            <Ellipse Width="8" Height="8" Fill="{StaticResource Accent}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <TextBlock x:Name="BusyText" Foreground="{StaticResource AccentDark}" FontWeight="SemiBold"/>
           </StackPanel>
-          <TextBox x:Name="LogBox" Height="74" IsReadOnly="True" Background="#0B0E14" Foreground="#8C96A8" BorderBrush="#1F2735"
+          <TextBox x:Name="LogBox" Height="74" IsReadOnly="True" Background="#FFFFFF" Foreground="#5A6A7E" BorderBrush="#E4EBF4"
                    FontFamily="Cascadia Mono, Consolas" FontSize="11" VerticalScrollBarVisibility="Auto"
                    HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap" Padding="8,6"/>
         </DockPanel>
         <StackPanel Grid.Column="1" Margin="22,0,0,0" VerticalAlignment="Center">
-          <TextBlock x:Name="SelCount" Foreground="#8C96A8" HorizontalAlignment="Right" Margin="0,0,0,8" Text="0 changes selected"/>
+          <TextBlock x:Name="SelCount" Foreground="#64748B" HorizontalAlignment="Right" Margin="0,0,0,8" Text="0 changes selected"/>
           <Button x:Name="BtnApply" Style="{StaticResource PrimaryBtn}" Margin="0" Padding="26,12" FontSize="14">
-            <StackPanel Orientation="Horizontal">
-              <TextBlock Text="&#xE73E;" FontFamily="{StaticResource Icons}" Margin="0,2,9,0"/>
-              <TextBlock Text="Review &amp; apply"/>
-            </StackPanel>
+            <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE73E;" FontFamily="{StaticResource Icons}" Margin="0,2,9,0"/><TextBlock Text="Review &amp; apply"/></StackPanel>
           </Button>
         </StackPanel>
       </Grid>
@@ -1885,11 +1836,34 @@ $RemovalJob = {
 </Window>
 '@
 
+function Get-SystemAccent {
+    # The Windows accent colour (DWM AccentColor is stored as 0xAABBGGRR). Fall back to a clean blue.
+    $fallback = '#0A84FF'
+    try {
+        $v = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\DWM' -Name AccentColor -ErrorAction Stop).AccentColor
+        $r = $v -band 0xFF; $g = ($v -shr 8) -band 0xFF; $b = ($v -shr 16) -band 0xFF
+        # Guard against a near-white accent that would vanish on a light background.
+        if (($r + $g + $b) -gt 660) { return $fallback }
+        return ('#{0:X2}{1:X2}{2:X2}' -f $r, $g, $b)
+    } catch { return $fallback }
+}
+function Convert-Shade([string]$hex, [double]$factor) {
+    $r = [Convert]::ToInt32($hex.Substring(1,2),16); $g = [Convert]::ToInt32($hex.Substring(3,2),16); $b = [Convert]::ToInt32($hex.Substring(5,2),16)
+    if ($factor -lt 1) { $r=[int]($r*$factor); $g=[int]($g*$factor); $b=[int]($b*$factor) }
+    else { $r=[int]($r+(255-$r)*($factor-1)); $g=[int]($g+(255-$g)*($factor-1)); $b=[int]($b+(255-$b)*($factor-1)) }
+    '#{0:X2}{1:X2}{2:X2}' -f [math]::Min(255,[math]::Max(0,$r)), [math]::Min(255,[math]::Max(0,$g)), [math]::Min(255,[math]::Max(0,$b))
+}
+$script:Accent = Get-SystemAccent
+[xml]$xaml = $xamlRaw.Replace('__ACCENT__', $script:Accent).Replace('__ACCENTDARK__', (Convert-Shade $script:Accent 0.80)).Replace('__ACCENTLIGHT__', (Convert-Shade $script:Accent 1.88))
+
 $window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
+$icoPath = Join-Path (Split-Path -Parent $PSCommandPath) 'WinOptimizer.ico'
+if (Test-Path $icoPath) { try { $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([Uri]$icoPath) } catch {} }
 $ui = @{}
 foreach ($n in @(
     'Tabs','SysInfo','GpuLine','BtnQuick','RamText','RamBar','RamSub','CpuText','CpuBar','PlanText','DeltaText','DeltaSub',
-    'ProcList','ProcNote','BtnRefreshProc','MemList','BtnMemRec','BtnMemNone','BtnTrim',
+    'ProcList','ProcNote','BtnRefreshProc','MemList','MemSearch','BloatSearch','StartSearch','CpuSearch','GpuSearch',
+    'BtnMemRec','BtnMemNone','BtnTrim',
     'BloatList','BloatStatus','BtnBloatRec','BtnBloatNone','BtnBloatRescan',
     'StartList','BtnStartNone','BtnStartReload','CpuList','BtnCpuRec','BtnCpuNone','GpuList','GpuInfo','BtnGpuRec','BtnGpuNone',
     'BackupList','BtnRestore','BtnRestorePoint','BtnOpenSysRestore','BtnOpenFolder',
@@ -1898,6 +1872,23 @@ foreach ($n in @(
     if (-not $ui[$n]) { throw "UI element '$n' not found" }
 }
 $script:LogBox = $ui.LogBox
+
+# Live search: filter the visible list by name / description / group as you type.
+function Set-ListFilter($list, $text) {
+    if (-not $list) { return }
+    $view = $list.Items
+    if ([string]::IsNullOrWhiteSpace($text)) { $view.Filter = $null; return }
+    $needle = $text.Trim()
+    $view.Filter = [Predicate[object]]({ param($o)
+        try { ("$($o.Name) $($o.Description) $($o.Group)") -match [regex]::Escape($needle) } catch { $true }
+    }.GetNewClosure())
+}
+$script:SearchMap = @{}
+foreach ($pair in @(@($ui.MemSearch, $ui.MemList), @($ui.BloatSearch, $ui.BloatList),
+                    @($ui.StartSearch, $ui.StartList), @($ui.CpuSearch, $ui.CpuList), @($ui.GpuSearch, $ui.GpuList))) {
+    $script:SearchMap[$pair[0]] = $pair[1]
+    $pair[0].add_TextChanged({ param($s, $e) Set-ListFilter $script:SearchMap[$s] $s.Text })
+}
 
 # ---------------------------------------------------------------------------
 # 9. State + UI wiring
@@ -2114,22 +2105,22 @@ function Show-Preview($selected) {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Review changes" Width="940" Height="680" WindowStartupLocation="CenterOwner"
-        Background="#0B0E14" Foreground="#E6EAF2" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13">
+        Background="#FFFFFF" Foreground="#1C2A3A" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13">
   <DockPanel Margin="26,22">
     <StackPanel DockPanel.Dock="Top" Margin="0,0,0,14">
-      <TextBlock Text="Review exactly what will change" FontSize="22" FontWeight="SemiBold" Foreground="White"/>
-      <TextBlock x:Name="Summary" Foreground="#8C96A8" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="19"/>
+      <TextBlock Text="Review exactly what will change" FontSize="22" FontWeight="SemiBold" Foreground="#152235"/>
+      <TextBlock x:Name="Summary" Foreground="#64748B" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="19"/>
     </StackPanel>
     <StackPanel DockPanel.Dock="Bottom" Margin="0,16,0,0">
-      <CheckBox x:Name="ChkRp" IsChecked="True" Foreground="#E6EAF2" Margin="0,0,0,14"
+      <CheckBox x:Name="ChkRp" IsChecked="True" Foreground="#1C2A3A" Margin="0,0,0,14"
                 Content="Create a System Restore point first (recommended - runs in the background, usually under a minute)"/>
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
         <Button x:Name="Cancel" Content="Cancel" Style="{DynamicResource Btn}" IsCancel="True" Margin="0,0,10,0"/>
         <Button x:Name="Ok" Content="Apply changes" Style="{DynamicResource PrimaryBtn}" Margin="0" Padding="22,9"/>
       </StackPanel>
     </StackPanel>
-    <TextBox x:Name="Details" IsReadOnly="True" FontFamily="Cascadia Mono, Consolas" FontSize="12" Background="#121722" Foreground="#D6DCE8"
-             BorderBrush="#1F2735" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Padding="12,10"/>
+    <TextBox x:Name="Details" IsReadOnly="True" FontFamily="Cascadia Mono, Consolas" FontSize="12" Background="#F6F9FD" Foreground="#243244"
+             BorderBrush="#E4EBF4" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Padding="12,10"/>
   </DockPanel>
 </Window>
 '@
@@ -2260,10 +2251,9 @@ function Complete-Apply($sync) {
         $msg += "`n`nProblems ($($ctx.Failures.Count)):`n" + ((@($ctx.Failures) | Select-Object -First 8 | ForEach-Object { "- $_" }) -join "`n")
         if ($ctx.Failures.Count -gt 8) { $msg += "`n- ...see the log at the bottom of the window" }
     }
-    $msg += "`n`nRestart now so everything takes full effect?"
+    $msg += "`n`nRestart Windows when it suits you so that service, startup and app changes take full effect. This app will not restart your PC for you."
     $icon = if ($ctx.Failures.Count) { 'Warning' } else { 'Information' }
-    $res = [System.Windows.MessageBox]::Show($msg, 'WinOptimizer', 'YesNo', $icon)
-    if ($res -eq 'Yes') { Restart-Computer -Force }
+    [System.Windows.MessageBox]::Show($msg, 'WinOptimizer', 'OK', $icon) | Out-Null
 }
 
 # ---------- Restore ----------
@@ -2272,11 +2262,11 @@ function Show-ReinstallDialog($entries) {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Reinstall removed apps" Width="600" Height="560" WindowStartupLocation="CenterOwner"
-        Background="#0B0E14" Foreground="#E6EAF2" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13">
+        Background="#FFFFFF" Foreground="#1C2A3A" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13">
   <DockPanel Margin="26,22">
     <StackPanel DockPanel.Dock="Top" Margin="0,0,0,16">
-      <TextBlock Text="Reinstall removed apps" FontSize="22" FontWeight="SemiBold" Foreground="White"/>
-      <TextBlock TextWrapping="Wrap" Foreground="#8C96A8" Margin="0,6,0,0" LineHeight="19"
+      <TextBlock Text="Reinstall removed apps" FontSize="22" FontWeight="SemiBold" Foreground="#152235"/>
+      <TextBlock TextWrapping="Wrap" Foreground="#64748B" Margin="0,6,0,0" LineHeight="19"
                  Text="Uninstalled apps cannot be put back automatically. Click an app to open its Microsoft Store (or download) page, then press Get / Install."/>
     </StackPanel>
     <Button x:Name="Close" DockPanel.Dock="Bottom" Content="Close" HorizontalAlignment="Right" Style="{DynamicResource Btn}" Margin="0,16,0,0" IsCancel="True"/>

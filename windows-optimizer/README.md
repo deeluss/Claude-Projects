@@ -4,16 +4,32 @@ A GUI tool for Windows 10/11 that turns off background features you don't need, 
 
 ## How to run
 
-**Easiest:** download `WinOptimizer.exe` and double-click it. It is a single file with the script embedded, needs only the .NET Framework 4.x that ships with every Windows 10/11, and asks for admin rights itself. Because it is unsigned, SmartScreen may say "Windows protected your PC": click *More info → Run anyway*.
+There is **no .exe** on purpose. An unsigned .exe that launches a script is the exact pattern antivirus tools flag as a generic "trojan" (see *Why antivirus may warn you* below), so WinOptimizer ships as a plain PowerShell script instead.
 
-**Alternative (script):**
-1. Put `WinOptimizer.ps1` and `Launch-WinOptimizer.bat` in the same folder.
-2. Double-click **`Launch-WinOptimizer.bat`** and accept the UAC prompt. The tool needs admin rights to change services and HKLM settings.
-3. Tick what you want on each page, click **Review & apply…**, read the preview, then confirm.
-4. Restart Windows when it asks.
+Download these four files into one folder (on the GitHub page, open each and click **Download raw file**):
 
-Run it from your own (administrator) Windows account. If you elevate with a *different* admin account's password, the per-user settings (HKCU) get applied to that account instead of yours.
+- `WinOptimizer.ps1` - the app
+- `WinOptimizer.ico` - the logo
+- `Install-WinOptimizer.bat` - creates a pinnable shortcut (optional)
+- `Launch-WinOptimizer.bat` - runs it directly (optional)
 
+Then either:
+
+- **To get an icon you can pin:** double-click **`Install-WinOptimizer.bat`**. It makes a *WinOptimizer* shortcut (with the logo) in your Start menu and on the Desktop. Open the Start menu, right-click *WinOptimizer* and choose **Pin to taskbar**. (Windows blocks apps from pinning themselves, so this one click is manual.)
+- **To just run it once:** double-click **`Launch-WinOptimizer.bat`**, or right-click `WinOptimizer.ps1` -> *Run with PowerShell*.
+
+Either way, accept the **UAC prompt** - the app needs admin rights to change services and system settings. Run it from your own administrator account.
+
+## Why antivirus may warn you
+
+If Defender (or another AV) flags the download, it is almost certainly a **false positive**, and it helps to understand why:
+
+- The detection fires on the *shape* of the file, not on malicious code. An unsigned program that runs PowerShell to change services, the registry and installed apps looks, to a heuristic, exactly like a "dropper". Generic machine-learning verdicts such as `Wacatac`, `Sabsik` or `Bearfoos` are the usual labels, and they have a high false-positive rate on unsigned self-built tools.
+- Shipping the readable `.ps1` (instead of an .exe that unpacks a hidden script) removes the single biggest trigger, which is why that is how it is distributed. The script is plain text - read it before running.
+- The honest ways to make this stop completely are **code signing** (a paid certificate) or Microsoft **allow-listing** the file. There is deliberately **no obfuscation or AV-evasion**, because disguising a tool that changes system settings would be exactly what real malware does. I would rather it occasionally trip a false positive you can read the source of than hide what it is.
+- If you trust it, you can report the false positive to Microsoft at the Windows Defender Security Intelligence "Submit a sample" page, or add the folder to Defender's exclusions.
+
+## Pages
 ## Pages
 
 | Page | What it does |
@@ -34,6 +50,9 @@ Run it from your own (administrator) Windows account. If you elevate with a *dif
 - **System Restore point.** One is created first. This is on by default, and the tool temporarily lifts Windows' "one per 24 h" limit to do it.
 - **JSON backup.** The original value of everything changed is saved to `%ProgramData%\WinOptimizer\Backups\backup-*.json`. **Backup & Restore** puts those values back exactly. The backup file is written even if an apply fails halfway.
 - **Services are not deleted.** They are only set to *Manual* (they still start on demand) or *Disabled*.
+- **It never restarts your PC for you.** After applying, it recommends a restart and leaves it to you.
+- **Search.** Each list page has a search box to filter long lists by name.
+- **Looks native.** The window uses your Windows accent colour.
 - **Log** at `%ProgramData%\WinOptimizer\WinOptimizer.log`.
 
 ## Removing bloatware: how it works and its limits
@@ -60,11 +79,3 @@ Things to know:
 - "Unused RAM is wasted RAM." Windows fills spare memory with *standby cache*, and it releases that cache instantly when an app needs it. Task Manager counts this cache as *Available*, not *In use*. Any tool that claims to "free" this cache is only making a number look better.
 - **Trim RAM now** really does lower the in-use figure, but only for a short time, because pages come back as apps touch them. That is why it is labelled *temporary*.
 - The CPU/GPU tweaks mostly make frame times smoother and lower latency. They will **not** add large amounts of average FPS. No tweak can stand in for drivers or hardware.
-
-## Rebuilding the .exe
-
-The exe is a small C# launcher (`launcher/Launcher.cs`) with `WinOptimizer.ps1` embedded as a resource. After editing the script, run `launcher/build.sh` (Mono `mcs`), or on Windows:
-
-```
-csc /target:winexe /resource:WinOptimizer.ps1,WinOptimizer.ps1 /r:System.Windows.Forms.dll /out:WinOptimizer.exe launcher\Launcher.cs
-```
