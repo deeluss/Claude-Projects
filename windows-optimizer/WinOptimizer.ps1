@@ -40,6 +40,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 # ---------------------------------------------------------------------------
 # 1. Paths, logging
 # ---------------------------------------------------------------------------
+$AppVersion = '1.3'
 $AppRoot    = Join-Path $env:ProgramData 'WinOptimizer'
 $BackupDir  = Join-Path $AppRoot 'Backups'
 $LogFile    = Join-Path $AppRoot 'WinOptimizer.log'
@@ -2489,7 +2490,7 @@ function Import-Preset {
 
 # ---------- Process end-task / pause dialog ----------
 function Show-ProcessDialog($row) {
-    if (-not $row) { return }
+    if (-not $row -or [string]::IsNullOrWhiteSpace($row.Name)) { Write-Log 'No process selected.' 'WARN'; return }
     $dx = [xml]@'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -2529,6 +2530,7 @@ function Show-ProcessDialog($row) {
         # Capture $procName, $span and $dlg as locals so the handler keeps them.
         $b.Add_Click(({
             try {
+                if ([string]::IsNullOrWhiteSpace($procName)) { throw 'Could not read the process name - double-click the app again.' }
                 $until = $null
                 if ($span) { $until = (Get-Date).Add([TimeSpan]$span) }
                 Pause-App $procName $until
@@ -2848,7 +2850,7 @@ $ui.BtnUpdRec.add_Click({ Set-Selection 'Update' $true $false })
 $ui.BtnUpdNone.add_Click({ Set-Selection 'Update' $false $true })
 $ui.BtnExport.add_Click({ Export-Preset })
 $ui.BtnImport.add_Click({ Import-Preset })
-$ui.ProcList.add_MouseDoubleClick({ Show-ProcessDialog $ui.ProcList.SelectedItem })
+$ui.ProcList.add_MouseDoubleClick({ try { Show-ProcessDialog $ui.ProcList.SelectedItem } catch { [System.Windows.MessageBox]::Show($_.Exception.Message, 'WinOptimizer') | Out-Null } })
 $ui.BtnPausedRefresh.add_Click({ Load-PausedTasks })
 $ui.BtnResumeAll.add_Click({
     foreach ($it in @(Get-ActivePauses)) { Resume-App $it.Exe }
@@ -2891,7 +2893,8 @@ $window.add_Loaded({
     $timer.Start()
     # Let the window paint first, then do the one-off scans.
     [void]$window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ContextIdle, [Action]{
-        Write-Log "WinOptimizer started. Log: $LogFile"
+        try { $window.Title = "WinOptimizer $AppVersion" } catch {}
+        Write-Log "WinOptimizer $AppVersion started. Log: $LogFile"
         try {
             $info = Get-SystemSummary
             $ui.SysInfo.Text = "$($info.Os)  -  $($info.Cpu)"
