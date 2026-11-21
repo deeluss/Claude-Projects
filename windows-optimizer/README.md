@@ -4,32 +4,35 @@ A GUI tool for Windows 10/11 that turns off background features you don't need, 
 
 ## How to run
 
-There is **no .exe** on purpose. An unsigned .exe that launches a script is the exact pattern antivirus tools flag as a generic "trojan" (see *Why antivirus may warn you* below), so WinOptimizer ships as a plain PowerShell script instead.
+Two ways, depending on what you care about more.
 
-Download these four files into one folder (on the GitHub page, open each and click **Download raw file**):
+### A) WinOptimizer.exe (one file, pinnable)
+Download **`WinOptimizer.exe`** and double-click it. The script and icon are bundled inside; it asks for admin rights itself. To pin it: right-click the .exe (or its Start-menu entry) -> *Pin to taskbar*.
 
-- `WinOptimizer.ps1` - the app
-- `WinOptimizer.ico` - the logo
-- `Install-WinOptimizer.bat` - creates a pinnable shortcut (optional)
-- `Launch-WinOptimizer.bat` - runs it directly (optional)
+Trade-off: because it is an **unsigned** program that runs PowerShell, Defender/SmartScreen is **likely to flag it** (see below). File -> Properties -> Details shows **Company: deeluss**, but UAC will still say *Unknown publisher* - a verified publisher needs a paid certificate (see *Publisher & signing*).
 
-Then either:
+### B) The script (least likely to be flagged)
+Download `WinOptimizer.ps1`, `WinOptimizer.ico`, `Install-WinOptimizer.bat` and `Launch-WinOptimizer.bat` into one folder, then:
+- double-click **`Install-WinOptimizer.bat`** to make a pinnable shortcut (with the logo), or
+- double-click **`Launch-WinOptimizer.bat`** to run it once.
 
-- **To get an icon you can pin:** double-click **`Install-WinOptimizer.bat`**. It makes a *WinOptimizer* shortcut (with the logo) in your Start menu and on the Desktop. Open the Start menu, right-click *WinOptimizer* and choose **Pin to taskbar**. (Windows blocks apps from pinning themselves, so this one click is manual.)
-- **To just run it once:** double-click **`Launch-WinOptimizer.bat`**, or right-click `WinOptimizer.ps1` -> *Run with PowerShell*.
+Either way, accept the **UAC prompt** and run it from your own administrator account.
 
-Either way, accept the **UAC prompt** - the app needs admin rights to change services and system settings. Run it from your own administrator account.
+## Publisher & signing
+
+- The .exe's metadata lists **deeluss** as the Company (visible in Properties -> Details).
+- That is **not** the same as a *verified publisher*. The name Windows shows in the UAC prompt and SmartScreen only appears when the file is **code-signed with a certificate issued to that name** by a trusted authority - which costs money and requires identity verification. Without it, UAC says *Unknown publisher* no matter what the metadata says.
+- A **self-signed** certificate named "deeluss" would put your name on the signature, but every other PC would still treat it as untrusted (*Unknown publisher*) unless it installs your certificate, and it does **not** stop Defender. So it is cosmetic. If you want that anyway, or you obtain a real certificate, the file can be signed with `signtool` (Windows) or `osslsigncode` (Linux/macOS).
 
 ## Why antivirus may warn you
 
-If Defender (or another AV) flags the download, it is almost certainly a **false positive**, and it helps to understand why:
+If Defender (or another AV) flags the download, it is almost certainly a **false positive**:
 
 - The detection fires on the *shape* of the file, not on malicious code. An unsigned program that runs PowerShell to change services, the registry and installed apps looks, to a heuristic, exactly like a "dropper". Generic machine-learning verdicts such as `Wacatac`, `Sabsik` or `Bearfoos` are the usual labels, and they have a high false-positive rate on unsigned self-built tools.
-- Shipping the readable `.ps1` (instead of an .exe that unpacks a hidden script) removes the single biggest trigger, which is why that is how it is distributed. The script is plain text - read it before running.
-- The honest ways to make this stop completely are **code signing** (a paid certificate) or Microsoft **allow-listing** the file. There is deliberately **no obfuscation or AV-evasion**, because disguising a tool that changes system settings would be exactly what real malware does. I would rather it occasionally trip a false positive you can read the source of than hide what it is.
-- If you trust it, you can report the false positive to Microsoft at the Windows Defender Security Intelligence "Submit a sample" page, or add the folder to Defender's exclusions.
+- The **.exe is the most likely to be flagged** because it unpacks and runs a hidden script - the textbook dropper pattern. The readable **`.ps1` (option B) is less likely to trip it**. If AV blocks the .exe, use the script.
+- There is deliberately **no obfuscation or AV-evasion** here, because disguising a tool that changes system settings is exactly what real malware does. The source is plain text - read it before running.
+- If you trust it, report the false positive to Microsoft at the Windows Defender Security Intelligence "Submit a sample" page, or add the file to Defender's exclusions.
 
-## Pages
 ## Pages
 
 | Page | What it does |
