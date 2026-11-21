@@ -1243,6 +1243,7 @@ $xamlRaw = @'
   </Window.Background>
   <Window.Resources>
     <FontFamily x:Key="Icons">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
+    <FontFamily x:Key="TitleFont">Segoe UI Semilight, Segoe UI Light, Segoe UI</FontFamily>
     <SolidColorBrush x:Key="Accent" Color="__ACCENT__"/>
     <SolidColorBrush x:Key="AccentDark" Color="__ACCENTDARK__"/>
     <SolidColorBrush x:Key="AccentLight" Color="__ACCENTLIGHT__"/>
@@ -1437,7 +1438,7 @@ $xamlRaw = @'
     </Style>
 
     <Style x:Key="PageTitle" TargetType="TextBlock">
-      <Setter Property="FontSize" Value="27"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="#152235"/>
+      <Setter Property="FontSize" Value="28"/><Setter Property="FontFamily" Value="{StaticResource TitleFont}"/><Setter Property="Foreground" Value="#152235"/>
     </Style>
     <Style x:Key="PageSub" TargetType="TextBlock">
       <Setter Property="Foreground" Value="#64748B"/><Setter Property="TextWrapping" Value="Wrap"/>
@@ -1541,7 +1542,7 @@ $xamlRaw = @'
                     <TextBlock Text="&#xEC4A;" FontFamily="{StaticResource Icons}" Foreground="White" FontSize="21" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                   </Border>
                   <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
-                    <TextBlock Text="WinOptimizer" FontSize="18" FontWeight="Bold" Foreground="#152235"/>
+                    <TextBlock Text="WinOptimizer" FontSize="20" FontFamily="{StaticResource TitleFont}" Foreground="#152235"/>
                     <TextBlock Text="Safe, reversible tuning" FontSize="11" Foreground="#8094AC"/>
                   </StackPanel>
                 </StackPanel>
@@ -1573,16 +1574,13 @@ $xamlRaw = @'
             <Grid>
               <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
               <StackPanel>
-                <TextBlock Text="Your PC at a glance" FontSize="27" FontWeight="SemiBold" Foreground="#152235"/>
+                <TextBlock Text="Your PC at a glance" FontSize="28" FontFamily="{StaticResource TitleFont}" Foreground="#152235"/>
                 <TextBlock x:Name="SysInfo" Foreground="#4C6180" Margin="0,8,0,0" TextWrapping="Wrap" Text="Loading..."/>
                 <TextBlock x:Name="GpuLine" Foreground="#6B7E98" FontSize="12" Margin="0,3,0,0" TextWrapping="Wrap"/>
               </StackPanel>
               <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="20,0,0,0">
                 <Button x:Name="BtnQuick" Style="{StaticResource PrimaryBtn}" Margin="0" Padding="20,11">
-                  <StackPanel Orientation="Horizontal">
-                    <TextBlock Text="&#xE945;" FontFamily="{StaticResource Icons}" Margin="0,1,9,0"/>
-                    <TextBlock Text="Quick optimize"/>
-                  </StackPanel>
+                  <TextBlock Text="Quick optimize"/>
                 </Button>
                 <TextBlock Text="Safe, recommended settings only" Foreground="#6B7E98" FontSize="11" Margin="0,8,0,0" HorizontalAlignment="Center"/>
               </StackPanel>
@@ -2108,7 +2106,7 @@ function Show-Preview($selected) {
         Background="#FFFFFF" Foreground="#1C2A3A" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13">
   <DockPanel Margin="26,22">
     <StackPanel DockPanel.Dock="Top" Margin="0,0,0,14">
-      <TextBlock Text="Review exactly what will change" FontSize="22" FontWeight="SemiBold" Foreground="#152235"/>
+      <TextBlock Text="Review exactly what will change" FontSize="23" FontFamily="Segoe UI Semilight, Segoe UI Light, Segoe UI" Foreground="#152235"/>
       <TextBlock x:Name="Summary" Foreground="#64748B" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="19"/>
     </StackPanel>
     <StackPanel DockPanel.Dock="Bottom" Margin="0,16,0,0">
@@ -2265,7 +2263,7 @@ function Show-ReinstallDialog($entries) {
         Background="#FFFFFF" Foreground="#1C2A3A" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13">
   <DockPanel Margin="26,22">
     <StackPanel DockPanel.Dock="Top" Margin="0,0,0,16">
-      <TextBlock Text="Reinstall removed apps" FontSize="22" FontWeight="SemiBold" Foreground="#152235"/>
+      <TextBlock Text="Reinstall removed apps" FontSize="23" FontFamily="Segoe UI Semilight, Segoe UI Light, Segoe UI" Foreground="#152235"/>
       <TextBlock TextWrapping="Wrap" Foreground="#64748B" Margin="0,6,0,0" LineHeight="19"
                  Text="Uninstalled apps cannot be put back automatically. Click an app to open its Microsoft Store (or download) page, then press Get / Install."/>
     </StackPanel>
