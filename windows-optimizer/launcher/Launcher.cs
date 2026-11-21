@@ -15,8 +15,8 @@ using System.Security.Principal;
 [assembly: AssemblyProduct("WinOptimizer")]
 [assembly: AssemblyCompany("deeluss")]
 [assembly: AssemblyCopyright("Copyright deeluss")]
-[assembly: AssemblyVersion("1.3.0.0")]
-[assembly: AssemblyFileVersion("1.3.0.0")]
+[assembly: AssemblyVersion("1.3.1.0")]
+[assembly: AssemblyFileVersion("1.3.1.0")]
 
 static class Program
 {

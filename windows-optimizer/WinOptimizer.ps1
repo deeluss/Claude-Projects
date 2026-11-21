@@ -40,7 +40,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 # ---------------------------------------------------------------------------
 # 1. Paths, logging
 # ---------------------------------------------------------------------------
-$AppVersion = '1.3'
+$AppVersion = '1.3.1'
 $AppRoot    = Join-Path $env:ProgramData 'WinOptimizer'
 $BackupDir  = Join-Path $AppRoot 'Backups'
 $LogFile    = Join-Path $AppRoot 'WinOptimizer.log'
@@ -56,6 +56,13 @@ function Write-Log {
         $script:LogBox.ScrollToEnd()
         Invoke-UiRefresh
     }
+}
+
+function Format-Err($err) {
+    $m = "$($err.Exception.Message)"
+    try { if ($err.Exception.GetType().Name) { $m += "  [$($err.Exception.GetType().Name)]" } } catch {}
+    try { if ($err.InvocationInfo -and $err.InvocationInfo.PositionMessage) { $m += "`n`n" + $err.InvocationInfo.PositionMessage } } catch {}
+    return $m
 }
 
 function Invoke-UiRefresh {
@@ -2250,6 +2257,11 @@ foreach ($n in @(
     if (-not $ui[$n]) { throw "UI element '$n' not found" }
 }
 $script:LogBox = $ui.LogBox
+try {
+    $window.Dispatcher.add_UnhandledException({ param($snd, $ev)
+        try { Write-Log ("UNHANDLED: " + $ev.Exception.Message + " | " + $ev.Exception.StackTrace) 'ERR' } catch {}
+    })
+} catch {}
 
 # Live search: filter the visible list by name / description / group as you type.
 function Set-ListFilter($list, $text) {
@@ -2514,9 +2526,14 @@ function Show-ProcessDialog($row) {
     $dlg.FindName('Sub').Text = "$($row.Count) running instance(s), $($row.MB) MB. Ending stops it now; pausing also stops it and prevents it reopening."
     $endName = $row.Name
     $dlg.FindName('End').Add_Click(({
-        $k = Stop-AppNow $endName
-        Write-Log "Ended ${endName}: stopped $k instance(s)." 'OK'
-        Update-Processes; $dlg.Close()
+        try {
+            $k = Stop-AppNow $endName
+            Write-Log "Ended ${endName}: stopped $k instance(s)." 'OK'
+            Update-Processes; $dlg.Close()
+        } catch {
+            $m = Format-Err $_; Write-Log "End-task error: $m" 'ERR'
+            [System.Windows.MessageBox]::Show($m, 'WinOptimizer - end task') | Out-Null
+        }
     }).GetNewClosure())
     $wrap = $dlg.FindName('Durations')
     $procName = $row.Name
@@ -2531,12 +2548,14 @@ function Show-ProcessDialog($row) {
         $b.Add_Click(({
             try {
                 if ([string]::IsNullOrWhiteSpace($procName)) { throw 'Could not read the process name - double-click the app again.' }
+                Write-Log "Pause requested for '$procName' (label: $label)"
                 $until = $null
                 if ($span) { $until = (Get-Date).Add([TimeSpan]$span) }
                 Pause-App $procName $until
                 Load-PausedTasks; Update-Processes; $dlg.Close()
             } catch {
-                [System.Windows.MessageBox]::Show($_.Exception.Message, 'WinOptimizer') | Out-Null
+                $m = Format-Err $_; Write-Log "Pause error: $m" 'ERR'
+                [System.Windows.MessageBox]::Show($m, 'WinOptimizer - pause') | Out-Null
             }
         }).GetNewClosure())
         [void]$wrap.Children.Add($b)
@@ -2850,7 +2869,7 @@ $ui.BtnUpdRec.add_Click({ Set-Selection 'Update' $true $false })
 $ui.BtnUpdNone.add_Click({ Set-Selection 'Update' $false $true })
 $ui.BtnExport.add_Click({ Export-Preset })
 $ui.BtnImport.add_Click({ Import-Preset })
-$ui.ProcList.add_MouseDoubleClick({ try { Show-ProcessDialog $ui.ProcList.SelectedItem } catch { [System.Windows.MessageBox]::Show($_.Exception.Message, 'WinOptimizer') | Out-Null } })
+$ui.ProcList.add_MouseDoubleClick({ try { Show-ProcessDialog $ui.ProcList.SelectedItem } catch { $m = Format-Err $_; Write-Log "Process dialog error: $m" 'ERR'; [System.Windows.MessageBox]::Show($m, 'WinOptimizer - open') | Out-Null } })
 $ui.BtnPausedRefresh.add_Click({ Load-PausedTasks })
 $ui.BtnResumeAll.add_Click({
     foreach ($it in @(Get-ActivePauses)) { Resume-App $it.Exe }
