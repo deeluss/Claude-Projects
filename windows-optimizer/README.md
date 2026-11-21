@@ -2,6 +2,8 @@
 
 A GUI tool for Windows 10/11 that turns off background features you don't need, to cut RAM use. It also has CPU and GPU latency tweaks. Every change is shown to you before it is applied, and every change can be undone.
 
+> **Antivirus flags this as a virus — is it safe?** Yes. It's an unsigned tool that automates Windows settings, which heuristics mistake for malware. The code is open and readable, nothing is hidden, and nothing is obfuscated to dodge detection. Full explanation: [Why antivirus flags it](#why-antivirus-flags-it-and-why-thats-expected).
+
 ## How to run
 
 Two ways, depending on what you care about more.
@@ -24,16 +26,42 @@ Either way, accept the **UAC prompt** and run it from your own administrator acc
 - That is **not** the same as a *verified publisher*. The name Windows shows in the UAC prompt and SmartScreen only appears when the file is **code-signed with a certificate issued to that name** by a trusted authority - which costs money and requires identity verification. Without it, UAC says *Unknown publisher* no matter what the metadata says.
 - A **self-signed** certificate named "deeluss" would put your name on the signature, but every other PC would still treat it as untrusted (*Unknown publisher*) unless it installs your certificate, and it does **not** stop Defender. So it is cosmetic. If you want that anyway, or you obtain a real certificate, the file can be signed with `signtool` (Windows) or `osslsigncode` (Linux/macOS).
 
-## Why antivirus may warn you
+## Why antivirus flags it (and why that's expected)
 
-If Defender (or another AV) flags the download, it is almost certainly a **false positive**:
+**Short version:** WinOptimizer is almost certainly flagged as a *false positive*. Antivirus is reacting to **what kind of program it is**, not to anything malicious inside it. If you don't trust that, don't take my word for it — the entire thing is plain, readable source code you can inspect before running.
 
-- The detection fires on the *shape* of the file, not on malicious code. An unsigned program that runs PowerShell to change services, the registry and installed apps looks, to a heuristic, exactly like a "dropper". Generic machine-learning verdicts such as `Wacatac`, `Sabsik` or `Bearfoos` are the usual labels, and they have a high false-positive rate on unsigned self-built tools.
-- The **.exe is the most likely to be flagged** because it unpacks and runs a hidden script - the textbook dropper pattern. The readable **`.ps1` (option B) is less likely to trip it**. If AV blocks the .exe, use the script.
-- There is deliberately **no obfuscation or AV-evasion** here, because disguising a tool that changes system settings is exactly what real malware does. The source is plain text - read it before running.
-- If you trust it, report the false positive to Microsoft at the Windows Defender Security Intelligence "Submit a sample" page, or add the file to Defender's exclusions.
+### What triggers the flag
+
+A security scanner doesn't "read" a program and decide it's evil. It looks at characteristics and plays the odds. WinOptimizer ticks several boxes that *also* describe real malware:
+
+| Trait | Why WinOptimizer has it | Why malware also has it |
+|---|---|---|
+| **Unsigned** | A code-signing certificate costs money and ID verification | Malware authors don't buy certificates either |
+| **No reputation** | It's a small project very few machines have ever seen | New malware is also "never seen before" |
+| **Runs PowerShell** | That's how it changes services, the registry and apps | Script-based droppers do the same |
+| **Asks for admin** | It genuinely needs it to change the system | So does anything trying to damage the system |
+| **(.exe) unpacks a hidden script** | The .exe bundles the script and runs it quietly | This is the classic "dropper" pattern |
+
+Because of that last point, scanners give it a **generic, pattern-based label** — names like `Wacatac`, `Sabsik`, or `Bearfoos`. These are not "we found known malware"; they're "this *looks like* the kind of thing malware does." They're well known for firing on unsigned, self-built utilities — debloat tools, modding tools, game trainers, and the like.
+
+### What is *not* happening
+
+- **No hidden or obfuscated code.** Everything is readable PowerShell. Obfuscating it to slip past antivirus is exactly what malware does, so it is deliberately **not** done here — even though that means the occasional false positive.
+- **No network exfiltration.** It doesn't send your data anywhere. The only outbound actions are optional and obvious (a DNS change you pick, or downloading an app you choose).
+- **Nothing irreversible without warning.** Every setting change is previewed, backed up, and reversible from the Backup & Restore page.
+
+### How to run it anyway
+
+- **Use the script, not the .exe.** `WinOptimizer.ps1` is plain text and is far less likely to be quarantined than the bundled `.exe` (which looks like a dropper). Right-click it → *Run with PowerShell*. It's the same app.
+- **Or allow the .exe.** Windows Security → *Virus & threat protection* → *Manage settings* → *Exclusions* → add the folder.
+- **Help everyone:** if you trust it, report the false positive to Microsoft via the *Windows Defender Security Intelligence → Submit a sample* page. Enough reports retrain the model.
+
+### The only real cure
+
+The flag goes away for good only with a **code-signing certificate** issued to a verified publisher (roughly $200+/year). That's the honest fix, and it's the one thing a free tool can't fake. Everything short of that — including setting the file's "Company" to a name — does **not** make Windows trust it.
 
 ## Pages
+
 
 | Page | What it does |
 |---|---|
