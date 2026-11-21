@@ -1125,6 +1125,7 @@ function Get-ActivePauses {
 }
 function Stop-AppNow([string]$procName) {
     $n = 0
+    if ([string]::IsNullOrWhiteSpace($procName)) { return 0 }
     Get-Process -Name $procName -ErrorAction SilentlyContinue | ForEach-Object {
         try { $_.Kill(); $n++ } catch {}
     }
@@ -1138,6 +1139,7 @@ function Resume-App([string]$exe) {
 }
 function Pause-App([string]$procName, $until) {
     # $until: a [datetime] for a timed pause, or $null for a permanent pause (lift from Paused Tasks).
+    if ([string]::IsNullOrWhiteSpace($procName)) { throw 'No process was selected.' }
     $exe = if ($procName -match '\.exe$') { $procName } else { "$procName.exe" }
     if ($exe -match $ProtectedExe) { throw "$exe is a protected system process and cannot be paused." }
     $key = Join-Path $IFEO $exe
@@ -2509,32 +2511,34 @@ function Show-ProcessDialog($row) {
     $dlg.Resources.MergedDictionaries.Add($window.Resources)
     $dlg.FindName('Ttl').Text = $row.Name
     $dlg.FindName('Sub').Text = "$($row.Count) running instance(s), $($row.MB) MB. Ending stops it now; pausing also stops it and prevents it reopening."
-    $dlg.FindName('End').Add_Click({
-        $k = Stop-AppNow $row.Name
-        Write-Log "Ended $($row.Name): stopped $k instance(s)." 'OK'
+    $endName = $row.Name
+    $dlg.FindName('End').Add_Click(({
+        $k = Stop-AppNow $endName
+        Write-Log "Ended ${endName}: stopped $k instance(s)." 'OK'
         Update-Processes; $dlg.Close()
-    })
+    }).GetNewClosure())
     $wrap = $dlg.FindName('Durations')
-    $mk = {
-        param($label, $span)
+    $procName = $row.Name
+    $plan = New-Object System.Collections.ArrayList
+    foreach ($key in $PauseDurations.Keys) { [void]$plan.Add(@{ Label = $key; Span = $PauseDurations[$key] }) }
+    [void]$plan.Add(@{ Label = 'Permanently'; Span = $null })
+    foreach ($entry in $plan) {
+        $label = $entry.Label; $span = $entry.Span
         $b = New-Object System.Windows.Controls.Button
-        $b.Content = $label; $b.Style = $window.FindResource('Btn')
-        $b.Add_Click({
+        $b.Content = $label; $b.Style = $window.FindResource('Btn'); $b.Margin = New-Object System.Windows.Thickness(0,0,8,8)
+        # Capture $procName, $span and $dlg as locals so the handler keeps them.
+        $b.Add_Click(({
             try {
                 $until = $null
-                if ($span) { $until = (Get-Date).Add($span) }
-                Pause-App $row.Name $until
-                Load-PausedTasks
-                Update-Processes
-                $dlg.Close()
+                if ($span) { $until = (Get-Date).Add([TimeSpan]$span) }
+                Pause-App $procName $until
+                Load-PausedTasks; Update-Processes; $dlg.Close()
             } catch {
                 [System.Windows.MessageBox]::Show($_.Exception.Message, 'WinOptimizer') | Out-Null
             }
-        }.GetNewClosure())
+        }).GetNewClosure())
         [void]$wrap.Children.Add($b)
     }
-    foreach ($key in $PauseDurations.Keys) { & $mk $key $PauseDurations[$key] }
-    & $mk 'Permanently' $null
     [void]$dlg.ShowDialog()
 }
 
