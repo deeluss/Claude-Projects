@@ -37,9 +37,13 @@ If Defender (or another AV) flags the download, it is almost certainly a **false
 
 | Page | What it does |
 |---|---|
-| Dashboard | Live RAM and CPU usage (same figures as Task Manager), the active power plan, top processes by memory and CPU, and a **Quick optimize** button that applies only the safe, recommended settings |
+| Dashboard | Live RAM and CPU usage (same figures as Task Manager), the active power plan, and top processes by memory and CPU. **Double-click a process** to end it now, or pause it (block it from relaunching) for 1h / 6h / 12h / 1d / 3d / 7d / 1 month / permanently. A **Quick optimize** button applies the recommended settings |
 | Memory / RAM | Telemetry, Widgets, Edge background/Startup Boost, ads and suggestions, Bing in Start, Copilot/Cortana policies, rarely used services, Xbox services, background Store apps, SysMain, the Search indexer, Print Spooler, svchost grouping |
 | Remove bloatware | Uninstalls preinstalled apps that are on a curated list (News, Clipchamp, Solitaire, Candy Crush, Teams, Xbox apps, etc.), plus **Microsoft Edge** and **OneDrive**. Only apps actually found on the PC are shown, and nothing is pre-selected |
+| Explorer & UI | Classic right-click menu, show file extensions/hidden files, dark mode, taskbar cleanup (remove Widgets/Chat/Task View, left-align), open Explorer to This PC |
+| Privacy & AI | Disable Recall, Copilot and app AI (Paint/Notepad/Edge), advertising ID, activity history, tailored experiences; disable NVIDIA telemetry; block telemetry servers via the hosts file; set DNS to Cloudflare or AdGuard |
+| Windows Update | Stop forced restarts, notify-before-download, defer feature updates a year, exclude drivers, or disable auto-updates entirely (advanced) |
+| Paused Tasks | Lists apps you paused from the Dashboard and lets you lift the pause early |
 | Startup apps | Lists everything that launches at sign-in. Disabling works the same way as in Task Manager. Windows Security is hidden and is never touched |
 | CPU | Ultimate/High Performance plan, foreground priority, MMCSS game scheduling, Game Mode, Power Throttling |
 | GPU | Turns off Game DVR background recording, transparency and animations. Also covers hardware-accelerated GPU scheduling and the windowed-game optimizations |
@@ -73,6 +77,13 @@ If Defender (or another AV) flags the download, it is almost certainly a **false
   - Some Windows builds still refuse the uninstall. When that happens, the tool tells you instead of claiming success.
   - A major Windows feature update can bring Edge back.
 - **OneDrive:** files marked "online-only" won't open on the PC after uninstalling. They stay safe in your OneDrive account. Mark the folder *Always keep on this device* first if you need the files offline.
+
+## New in this version
+
+- **Explorer & UI, Privacy & AI, Windows Update** pages — dozens of reversible registry tweaks (classic context menu, dark mode, disable Recall/Copilot/app-AI, telemetry and update control).
+- **Block telemetry servers** (hosts file) and **DNS changer** (Cloudflare / AdGuard), both reversible from Backup & Restore.
+- **End task & pause apps**: double-click a process on the Dashboard to stop it, or pause it so it cannot relaunch for a set time (or permanently). Pausing uses Image File Execution Options and an auto-expiry scheduled task; a **Paused Tasks** page lists active pauses and lifts them early. System-critical processes are protected from pausing.
+- **Presets**: export your ticked changes to a `.json` file and import it on another PC (buttons on Backup & Restore).
 
 ## What to expect (honest numbers)
 

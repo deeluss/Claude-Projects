@@ -410,10 +410,11 @@ function Get-RegState([string]$Path, [string]$Name) {
     $state = [ordered]@{ Existed = $false; Value = $null; Kind = $null }
     if (Test-Path $Path) {
         $item = Get-Item -Path $Path -ErrorAction SilentlyContinue
-        if ($item -and ($item.GetValueNames() -contains $Name)) {
+        $vn = if ($Name -eq '(Default)') { '' } else { $Name }
+        if ($item -and ($item.GetValueNames() -contains $vn)) {
             $state.Existed = $true
-            $state.Kind    = $item.GetValueKind($Name).ToString()
-            $raw = $item.GetValue($Name, $null, 'DoNotExpandEnvironmentNames')
+            $state.Kind    = $item.GetValueKind($vn).ToString()
+            $raw = $item.GetValue($vn, $null, 'DoNotExpandEnvironmentNames')
             if ($raw -is [byte[]]) { $state.Value = @($raw | ForEach-Object { [int]$_ }) } else { $state.Value = $raw }
         }
     }
@@ -422,6 +423,7 @@ function Get-RegState([string]$Path, [string]$Name) {
 
 function Set-RegValue([string]$Path, [string]$Name, $Value, [string]$Kind) {
     if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
+    if ($Name -eq '(Default)') { Set-Item -Path $Path -Value "$Value"; return }
     switch ($Kind) {
         'Binary'      { $Value = [byte[]]@($Value) }
         'DWord'       { $Value = [int]$Value }
@@ -538,6 +540,8 @@ function Get-ActionDescription($a) {
         'Appx'     { return 'UNINSTALL for all users (and stop it reinstalling for new accounts): ' + (@($a.Found) -join ', ') }
         'Edge'     { return 'UNINSTALL Microsoft Edge system-wide and block Edge Update from reinstalling it. Edge WebView2 Runtime is kept.' }
         'OneDrive' { return 'UNINSTALL the OneDrive sync client. Files in your OneDrive cloud account are not deleted.' }
+        'Hosts'    { return 'Block ' + (@($a.Domains).Count) + ' telemetry domains in the hosts file (0.0.0.0): ' + ((@($a.Domains) | Select-Object -First 3) -join ', ') + ', ...' }
+        'Dns'      { return 'Set DNS on all active network adapters to ' + $a.Label + ' (' + (@($a.Servers) -join ', ') + '). Reverts to automatic (DHCP).' }
     }
 }
 
@@ -561,6 +565,8 @@ function Test-Action($a) {
             $cur = Get-ActiveScheme
             if ($cur -and $cur.Name -match 'Ultimate|High performance|Höchstleistung') { 'Applied' } else { 'NotApplied' }
         }
+        'Hosts' { if (Get-HostsBlocked) { 'Applied' } else { 'NotApplied' } }
+        'Dns'   { if (Test-DnsApplied $a.Servers) { 'Applied' } else { 'NotApplied' } }
     }
 }
 
@@ -611,6 +617,18 @@ function Invoke-Action($a) {
             Write-Log "  power plan -> $res" 'OK'
             return [ordered]@{ Type = 'PowerPlan'; Previous = $cur.Guid; PreviousName = $cur.Name }
         }
+        'Hosts' {
+            if (Get-HostsBlocked) { Write-Log '  telemetry hosts block already present'; return $null }
+            Set-HostsBlocked $a.Domains $true
+            Write-Log "  blocked $(@($a.Domains).Count) telemetry domains in the hosts file" 'OK'
+            return [ordered]@{ Type = 'Hosts' }
+        }
+        'Dns' {
+            if ((Test-Action $a) -eq 'Applied') { Write-Log '  DNS already set'; return $null }
+            $prev = Set-DnsServers $a.Servers
+            Write-Log "  DNS -> $($a.Label) on $(@($prev).Count) adapter(s)" 'OK'
+            return [ordered]@{ Type = 'Dns'; Previous = @($prev) }
+        }
     }
 }
 
@@ -627,7 +645,8 @@ function Restore-Entry($e) {
                 Set-RegValue $e.Path $e.Name $e.Value $e.Kind
                 Write-Log "  reg $($e.Path)\$($e.Name) restored" 'OK'
             } else {
-                Remove-ItemProperty -Path $e.Path -Name $e.Name -ErrorAction SilentlyContinue
+                $rn = if ($e.Name -eq '(Default)') { '(default)' } else { $e.Name }
+                Remove-ItemProperty -Path $e.Path -Name $rn -ErrorAction SilentlyContinue
                 Write-Log "  reg $($e.Path)\$($e.Name) removed (was not set before)" 'OK'
             }
         }
@@ -639,7 +658,71 @@ function Restore-Entry($e) {
             powercfg /setactive $e.Previous | Out-Null
             Write-Log "  power plan restored to $($e.PreviousName)" 'OK'
         }
+        'Hosts' { Set-HostsBlocked @() $false; Write-Log '  telemetry hosts block removed' 'OK' }
+        'Dns' {
+            foreach ($pp in @($e.Previous)) {
+                try {
+                    if (@($pp.Servers).Count) { Set-DnsClientServerAddress -InterfaceIndex $pp.Index -ServerAddresses @($pp.Servers) -ErrorAction Stop }
+                    else { Set-DnsClientServerAddress -InterfaceIndex $pp.Index -ResetServerAddresses -ErrorAction Stop }
+                } catch {}
+            }
+            Write-Log '  DNS restored' 'OK'
+        }
     }
+}
+
+# ---------------------------------------------------------------------------
+# 4b. Hosts-file telemetry blocking + DNS helpers
+# ---------------------------------------------------------------------------
+$HostsFile  = "$env:SystemRoot\System32\drivers\etc\hosts"
+$HostsBegin = '# >>> WinOptimizer telemetry block'
+$HostsEnd   = '# <<< WinOptimizer telemetry block'
+$TelemetryDomains = @(
+    'vortex.data.microsoft.com','vortex-win.data.microsoft.com','telecommand.telemetry.microsoft.com',
+    'oca.telemetry.microsoft.com','sqm.telemetry.microsoft.com','watson.telemetry.microsoft.com',
+    'telemetry.microsoft.com','settings-sandbox.data.microsoft.com','vortex-sandbox.data.microsoft.com',
+    'watson.ppe.telemetry.microsoft.com','telemetry.appex.bing.net','telemetry.urs.microsoft.com',
+    'settings-win.data.microsoft.com','v10.vortex-win.data.microsoft.com','v10.events.data.microsoft.com',
+    'v20.events.data.microsoft.com','functional.events.data.microsoft.com','browser.events.data.msn.com'
+)
+function Get-HostsBlocked {
+    if (-not (Test-Path $HostsFile)) { return $false }
+    try { return ((Get-Content $HostsFile -Raw -ErrorAction Stop) -match [regex]::Escape($HostsBegin)) } catch { return $false }
+}
+function Set-HostsBlocked([string[]]$domains, [bool]$on) {
+    $lines = @(); if (Test-Path $HostsFile) { $lines = @(Get-Content $HostsFile -ErrorAction SilentlyContinue) }
+    $out = New-Object System.Collections.ArrayList; $skip = $false
+    foreach ($l in $lines) {
+        if ($l -eq $HostsBegin) { $skip = $true; continue }
+        if ($l -eq $HostsEnd)   { $skip = $false; continue }
+        if (-not $skip) { [void]$out.Add($l) }
+    }
+    if ($on) {
+        [void]$out.Add($HostsBegin)
+        foreach ($d in $domains) { [void]$out.Add("0.0.0.0 $d"); [void]$out.Add("0.0.0.0 www.$d") }
+        [void]$out.Add($HostsEnd)
+    }
+    Set-Content -Path $HostsFile -Value $out -Encoding ASCII -Force
+}
+function Get-UpAdapters {
+    try { return @(Get-NetAdapter -Physical -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' }) } catch { return @() }
+}
+function Test-DnsApplied([string[]]$servers) {
+    $ad = Get-UpAdapters; if (-not $ad.Count) { return $false }
+    foreach ($a in $ad) {
+        $cur = @((Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
+        if ((@($cur) -join ',') -ne (@($servers) -join ',')) { return $false }
+    }
+    return $true
+}
+function Set-DnsServers([string[]]$servers) {
+    $prev = @()
+    foreach ($a in Get-UpAdapters) {
+        $cur = @((Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
+        $prev += @{ Index = $a.ifIndex; Servers = $cur }
+        try { Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses $servers -ErrorAction Stop } catch {}
+    }
+    return $prev
 }
 
 # ---------------------------------------------------------------------------
@@ -648,6 +731,8 @@ function Restore-Entry($e) {
 function Svc($n, $s)              { @{ Type = 'Service'; Name = $n; Start = $s } }
 function Reg($p, $n, $v, $k='DWord') { @{ Type = 'Reg'; Path = $p; Name = $n; Value = $v; Kind = $k } }
 function Tsk($p, $n)              { @{ Type = 'Task'; TaskPath = $p; TaskName = $n } }
+function Hst($domains)            { @{ Type = 'Hosts'; Domains = @($domains) } }
+function Dns($servers, $label)    { @{ Type = 'Dns'; Servers = @($servers); Label = $label } }
 
 function New-Tweak {
     param($Id, $Category, $Name, $Risk, [bool]$Recommended, $Description, $Tradeoff, $Actions)
@@ -814,6 +899,137 @@ function Get-TweakCatalog {
         'Windows 11 feature that upgrades DirectX 10/11 games running windowed/borderless to the modern flip presentation model: lower latency and VRR support, close to exclusive fullscreen. Your other DirectX settings (Auto HDR etc.) are preserved.' `
         'A few older games may show overlay or capture glitches; restore if so.' @(
         (Reg $dxPath 'DirectXUserGlobalSettings' $dxNew 'String'))
+
+    # ------------------------------ EXPLORER & UI ------------------------------
+    New-Tweak 'ctxmenu' 'UI' 'Classic right-click menu (Windows 10 style)' 'Safe' $true `
+        'Restores the full right-click context menu instead of the trimmed Windows 11 one that hides options behind "Show more options".' `
+        'Explorer restarts to apply. Purely behavioural.' @(
+        (Reg 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32' '(Default)' '' 'String'))
+
+    New-Tweak 'fileext' 'UI' 'Show file extensions' 'Safe' $true `
+        'Shows extensions like .exe and .txt so you can spot files disguised as documents.' 'None.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'HideFileExt' 0))
+
+    New-Tweak 'hidden' 'UI' 'Show hidden files' 'Safe' $false `
+        'Shows hidden files and folders in File Explorer.' 'None.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'Hidden' 1))
+
+    New-Tweak 'darkmode' 'UI' 'Dark mode (apps + system)' 'Safe' $true `
+        'Switches Windows and built-in apps to the dark theme.' 'Purely visual.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' 'AppsUseLightTheme' 0),
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' 'SystemUsesLightTheme' 0))
+
+    New-Tweak 'taskbaralign' 'UI' 'Taskbar: align to the left' 'Safe' $false `
+        'Moves the taskbar icons and Start button to the left (Windows 10 style).' 'None.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'TaskbarAl' 0))
+
+    New-Tweak 'taskbarwidgets' 'UI' 'Taskbar: remove Widgets button' 'Safe' $true `
+        'Hides the Widgets (weather) button from the taskbar.' 'None.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'TaskbarDa' 0))
+
+    New-Tweak 'taskbarchat' 'UI' 'Taskbar: remove Chat / Teams button' 'Safe' $true `
+        'Hides the Chat (Microsoft Teams) button from the taskbar.' 'None.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'TaskbarMn' 0))
+
+    New-Tweak 'taskview' 'UI' 'Taskbar: remove Task View button' 'Safe' $false `
+        'Hides the Task View button. Win+Tab still works.' 'None.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'ShowTaskViewButton' 0))
+
+    New-Tweak 'searchbox' 'UI' 'Taskbar: shrink search to an icon' 'Safe' $false `
+        'Replaces the wide taskbar search box with a small search icon.' 'None.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' 'SearchboxTaskbarMode' 1))
+
+    New-Tweak 'endtask' 'UI' 'Taskbar: add "End task" to right-click' 'Safe' $true `
+        'Adds an End task option when you right-click a running app on the taskbar.' 'None.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings' 'TaskbarEndTask' 1))
+
+    New-Tweak 'explorerthispc' 'UI' 'Open File Explorer to This PC' 'Safe' $false `
+        'File Explorer opens to This PC instead of Home / Quick access.' 'None.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'LaunchTo' 1))
+
+    # ------------------------------ PRIVACY & AI ------------------------------
+    New-Tweak 'recall' 'Privacy' 'Disable Windows Recall (AI screen snapshots)' 'Safe' $true `
+        'Turns off Recall, which periodically screenshots everything you do so AI can search it.' 'The Recall timeline is unavailable.' @(
+        (Reg 'HKCU:\Software\Policies\Microsoft\Windows\WindowsAI' 'DisableAIDataAnalysis' 1),
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' 'DisableAIDataAnalysis' 1))
+
+    New-Tweak 'paintai' 'Privacy' 'Disable Paint AI (Cocreator / Image Creator)' 'Safe' $true `
+        'Removes the generative-AI buttons from Paint.' 'Paint still works normally.' @(
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Paint' 'DisableCocreator' 1),
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Paint' 'DisableGenerativeFill' 1),
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Paint' 'DisableImageCreator' 1))
+
+    New-Tweak 'notepadai' 'Privacy' 'Disable Notepad AI (Rewrite)' 'Safe' $true `
+        'Removes the AI Rewrite feature from Notepad.' 'Notepad still works normally.' @(
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsNotepad' 'DisableAIFeatures' 1))
+
+    New-Tweak 'edgeai' 'Privacy' 'Disable Edge Copilot / sidebar AI' 'Safe' $true `
+        'Turns off the Copilot sidebar in Microsoft Edge.' 'Edge shows "Managed by your organization".' @(
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' 'HubsSidebarEnabled' 0),
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' 'DiscoverPageContextEnabled' 0))
+
+    New-Tweak 'advertisingid' 'Privacy' 'Disable advertising ID' 'Safe' $true `
+        'Stops apps using your advertising ID to profile you across apps.' 'Ads become less personalised.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo' 'Enabled' 0),
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo' 'DisabledByGroupPolicy' 1))
+
+    New-Tweak 'activityhistory' 'Privacy' 'Disable activity history / Timeline' 'Safe' $true `
+        'Stops Windows collecting and uploading your activity history.' 'Timeline is unavailable.' @(
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'EnableActivityFeed' 0),
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'PublishUserActivities' 0),
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'UploadUserActivities' 0))
+
+    New-Tweak 'tailored' 'Privacy' 'Disable tailored experiences' 'Safe' $true `
+        'Stops Windows using your diagnostic data to show tailored tips and ads.' 'None.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy' 'TailoredExperiencesWithDiagnosticDataEnabled' 0))
+
+    New-Tweak 'apptracking' 'Privacy' 'Disable app-launch tracking' 'Safe' $false `
+        'Stops Windows tracking which apps you open for Start suggestions.' 'None.' @(
+        (Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'Start_TrackProgs' 0))
+
+    New-Tweak 'nvtelemetry' 'Privacy' 'Disable NVIDIA telemetry' 'Safe' $false `
+        'Disables the NVIDIA telemetry container service (only if present).' 'Your NVIDIA driver still works.' @(
+        (Svc 'NvTelemetryContainer' 'Disabled'))
+
+    New-Tweak 'telemetryhosts' 'Privacy' 'Block telemetry servers (hosts file)' 'Moderate' $false `
+        'Adds Microsoft telemetry domains to the hosts file pointing at 0.0.0.0 so the PC cannot reach them.' `
+        'A future Windows update could add new domains. Fully reversible from Backup & Restore.' @(
+        (Hst $TelemetryDomains))
+
+    New-Tweak 'dnscloudflare' 'Privacy' 'Set DNS to Cloudflare (1.1.1.1)' 'Moderate' $false `
+        'Points all active network adapters at Cloudflare DNS - often faster and more private than your ISP.' `
+        'On a hotel/captive-portal wifi you may need to revert. Reversible to automatic (DHCP).' @(
+        (Dns @('1.1.1.1','1.0.0.1') 'Cloudflare'))
+
+    New-Tweak 'dnsadguard' 'Privacy' 'Set DNS to AdGuard (blocks ads/trackers)' 'Moderate' $false `
+        'Points all active adapters at AdGuard DNS, which blocks many ad and tracker domains network-wide.' `
+        'Some sites relying on tracked content may misbehave. Reversible to automatic (DHCP).' @(
+        (Dns @('94.140.14.14','94.140.15.15') 'AdGuard'))
+
+    # ------------------------------ WINDOWS UPDATE ------------------------------
+    New-Tweak 'noautoreboot' 'Update' 'No automatic restart while signed in' 'Safe' $true `
+        'Windows will not automatically reboot to finish updates while you are logged in.' 'You still need to restart eventually.' @(
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoRebootWithLoggedOnUsers' 1))
+
+    New-Tweak 'notifyupdates' 'Update' 'Notify before downloading updates' 'Safe' $false `
+        'Windows asks before downloading and installing updates instead of doing it automatically.' `
+        'You must remember to install updates yourself - keep up with security patches.' @(
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoUpdate' 0),
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'AUOptions' 2))
+
+    New-Tweak 'deferfeature' 'Update' 'Defer feature updates (1 year)' 'Moderate' $false `
+        'Holds back big Windows version upgrades for 365 days so you are not an early tester.' 'You still receive monthly security updates.' @(
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' 'DeferFeatureUpdates' 1),
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' 'DeferFeatureUpdatesPeriodInDays' 365))
+
+    New-Tweak 'nodrivers' 'Update' 'Exclude drivers from Windows Update' 'Moderate' $false `
+        'Stops Windows Update replacing your drivers - use the vendor''s installer instead.' 'You update drivers yourself.' @(
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' 'ExcludeWUDriversInQualityUpdate' 1))
+
+    New-Tweak 'disableupdates' 'Update' 'Disable automatic updates entirely' 'Advanced' $false `
+        'Turns off automatic Windows Updates completely.' `
+        'RISK: your PC stops getting security patches until you re-enable this and check for updates manually. Reversible.' @(
+        (Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoUpdate' 1))
     )
 }
 
@@ -881,6 +1097,81 @@ function Get-MemStats {
 }
 
 function Invoke-TrimWorkingSets { [WinOpt.Collector]::TrimAll() }
+
+# ---------------------------------------------------------------------------
+# 7b. Process control: end task + timed "pause" (block relaunch for a while)
+# ---------------------------------------------------------------------------
+# Blocking uses Image File Execution Options: an app with a "Debugger" pointed at a
+# harmless stub (systray.exe, which just exits) will not launch. A scheduled task lifts
+# the block when the pause expires; the Paused Tasks page can lift it early.
+$IFEO        = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options'
+$PauseStub   = "$env:SystemRoot\System32\systray.exe"
+$PausedFile  = Join-Path $AppRoot 'paused.json'
+# Never allow pausing these - blocking them could lock you out of the PC.
+$ProtectedExe = '^(explorer|winlogon|csrss|wininit|services|lsass|smss|dwm|svchost|taskmgr|systemsettings|sihost|ctfmon|powershell|cmd|conhost|runtimebroker|startmenuexperiencehost|searchhost|shellexperiencehost|applicationframehost|fontdrvhost|dllhost|WinOptimizer)\.exe$'
+
+function Read-PausedApps {
+    if (-not (Test-Path $PausedFile)) { return @() }
+    try { return @((Get-Content $PausedFile -Raw | ConvertFrom-Json)) } catch { return @() }
+}
+function Write-PausedApps($list) {
+    @($list) | ConvertTo-Json -Depth 4 | Set-Content -Path $PausedFile -Encoding UTF8
+}
+function Get-ActivePauses {
+    # Only entries whose IFEO block still exists, refreshed back to the file.
+    $live = @(Read-PausedApps | Where-Object { $_.Exe -and (Test-Path (Join-Path $IFEO $_.Exe)) })
+    Write-PausedApps $live
+    return $live
+}
+function Stop-AppNow([string]$procName) {
+    $n = 0
+    Get-Process -Name $procName -ErrorAction SilentlyContinue | ForEach-Object {
+        try { $_.Kill(); $n++ } catch {}
+    }
+    return $n
+}
+function Resume-App([string]$exe) {
+    try { Remove-Item -LiteralPath (Join-Path $IFEO $exe) -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+    try { Unregister-ScheduledTask -TaskName "WinOptimizer-Unpause-$exe" -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+    Write-PausedApps @(Read-PausedApps | Where-Object { $_.Exe -ne $exe })
+    Write-Log "Resumed $exe (pause lifted)" 'OK'
+}
+function Pause-App([string]$procName, $until) {
+    # $until: a [datetime] for a timed pause, or $null for a permanent pause (lift from Paused Tasks).
+    $exe = if ($procName -match '\.exe$') { $procName } else { "$procName.exe" }
+    if ($exe -match $ProtectedExe) { throw "$exe is a protected system process and cannot be paused." }
+    $key = Join-Path $IFEO $exe
+    if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+    Set-ItemProperty -Path $key -Name 'Debugger' -Value $PauseStub -Type String -Force
+    $killed = Stop-AppNow $procName
+    $taskName = "WinOptimizer-Unpause-$exe"
+    try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+    if ($until) {
+        # Schedule automatic unblock at $until (SYSTEM, highest).
+        $cmd = "Remove-Item -LiteralPath '$key' -Recurse -Force -EA SilentlyContinue; Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false -EA SilentlyContinue"
+        try {
+            $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -Command `"$cmd`""
+            $trg = New-ScheduledTaskTrigger -Once -At $until
+            $prn = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            Register-ScheduledTask -TaskName $taskName -Action $act -Trigger $trg -Principal $prn -Force -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Log "  warning: could not schedule auto-unpause ($($_.Exception.Message)). Lift it manually from Paused Tasks." 'WARN'
+        }
+    }
+    $untilStr = $null; if ($until) { $untilStr = $until.ToString('o') }
+    $list = @(Read-PausedApps | Where-Object { $_.Exe -ne $exe })
+    $list += @{ Exe = $exe; Proc = $procName; Until = $untilStr }
+    Write-PausedApps $list
+    $msg = if ($until) { "until $($until.ToString('g'))" } else { 'permanently (until you lift it)' }
+    Write-Log "Paused $exe $msg (killed $killed running instance(s))" 'OK'
+}
+# Human label -> timespan for the pause durations.
+$PauseDurations = [ordered]@{
+    '1 hour'   = ([TimeSpan]::FromHours(1));  '6 hours'  = ([TimeSpan]::FromHours(6))
+    '12 hours' = ([TimeSpan]::FromHours(12)); '1 day'    = ([TimeSpan]::FromDays(1))
+    '3 days'   = ([TimeSpan]::FromDays(3));   '7 days'   = ([TimeSpan]::FromDays(7))
+    '1 month'  = ([TimeSpan]::FromDays(30))
+}
 
 function Get-SystemSummary {
     # Registry reads instead of WMI: instant.
@@ -1632,7 +1923,7 @@ $xamlRaw = @'
                 <StackPanel VerticalAlignment="Center">
                   <TextBlock Text="Top processes by memory" FontSize="16" FontWeight="SemiBold" Foreground="#152235"/>
                   <TextBlock x:Name="ProcNote" Foreground="#8094AC" FontSize="11" Margin="0,3,0,0"
-                             Text="Memory = private working set, the same figure as Task Manager's Memory column."/>
+                             Text="Memory = private working set (Task Manager's Memory column).  Double-click an app to end it or pause it."/>
                 </StackPanel>
               </DockPanel>
               <ListView x:Name="ProcList" Background="Transparent" BorderThickness="0" Foreground="#243244"
@@ -1742,6 +2033,46 @@ $xamlRaw = @'
         </DockPanel>
       </TabItem>
 
+      <TabItem>
+        <TabItem.Header><StackPanel Orientation="Horizontal">
+          <TextBlock Text="&#xE8B7;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+          <TextBlock Text="Explorer &amp; UI" FontSize="14" VerticalAlignment="Center"/></StackPanel></TabItem.Header>
+        <DockPanel>
+          <StackPanel DockPanel.Dock="Top">
+            <TextBlock Text="Explorer &amp; UI" Style="{StaticResource PageTitle}"/>
+            <TextBlock Style="{StaticResource PageSub}" Text="Explorer, taskbar and theme tweaks - classic right-click menu, show file extensions, dark mode, taskbar cleanup. All reversible."/>
+            <DockPanel Margin="0,0,0,2">
+              <TextBox x:Name="UiSearch" DockPanel.Dock="Right" Style="{StaticResource Search}" Width="240" Height="34" Margin="8,0,0,8" Tag="Search UI tweaks..."/>
+              <WrapPanel>
+                <Button x:Name="BtnUiRec" Content="Select recommended" Style="{StaticResource Btn}"/>
+                <Button x:Name="BtnUiNone" Content="Select none" Style="{StaticResource Btn}"/>
+              </WrapPanel>
+            </DockPanel>
+          </StackPanel>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0"><ItemsControl x:Name="UiList" ItemTemplate="{StaticResource TweakTemplate}"/></ScrollViewer>
+        </DockPanel>
+      </TabItem>
+
+      <TabItem>
+        <TabItem.Header><StackPanel Orientation="Horizontal">
+          <TextBlock Text="&#xE72E;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+          <TextBlock Text="Privacy &amp; AI" FontSize="14" VerticalAlignment="Center"/></StackPanel></TabItem.Header>
+        <DockPanel>
+          <StackPanel DockPanel.Dock="Top">
+            <TextBlock Text="Privacy &amp; AI" Style="{StaticResource PageTitle}"/>
+            <TextBlock Style="{StaticResource PageSub}" Text="Turn off Recall, Copilot and app AI (Paint/Notepad/Edge), advertising ID, activity history and telemetry. Block telemetry servers or change DNS. All reversible."/>
+            <DockPanel Margin="0,0,0,2">
+              <TextBox x:Name="PrivSearch" DockPanel.Dock="Right" Style="{StaticResource Search}" Width="240" Height="34" Margin="8,0,0,8" Tag="Search privacy tweaks..."/>
+              <WrapPanel>
+                <Button x:Name="BtnPrivRec" Content="Select recommended" Style="{StaticResource Btn}"/>
+                <Button x:Name="BtnPrivNone" Content="Select none" Style="{StaticResource Btn}"/>
+              </WrapPanel>
+            </DockPanel>
+          </StackPanel>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0"><ItemsControl x:Name="PrivList" ItemTemplate="{StaticResource TweakTemplate}"/></ScrollViewer>
+        </DockPanel>
+      </TabItem>
+
       <!-- CPU -->
       <TabItem>
         <TabItem.Header><StackPanel Orientation="Horizontal">
@@ -1785,6 +2116,46 @@ $xamlRaw = @'
         </DockPanel>
       </TabItem>
 
+      <TabItem>
+        <TabItem.Header><StackPanel Orientation="Horizontal">
+          <TextBlock Text="&#xE895;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+          <TextBlock Text="Windows Update" FontSize="14" VerticalAlignment="Center"/></StackPanel></TabItem.Header>
+        <DockPanel>
+          <StackPanel DockPanel.Dock="Top">
+            <TextBlock Text="Windows Update" Style="{StaticResource PageTitle}"/>
+            <TextBlock Style="{StaticResource PageSub}" Text="Control how and when Windows updates: stop forced restarts, defer feature updates, exclude drivers, or disable auto-updates entirely (advanced). All reversible."/>
+            <DockPanel Margin="0,0,0,2">
+              <TextBox x:Name="UpdSearch" DockPanel.Dock="Right" Style="{StaticResource Search}" Width="240" Height="34" Margin="8,0,0,8" Tag="Search update options..."/>
+              <WrapPanel>
+                <Button x:Name="BtnUpdRec" Content="Select recommended" Style="{StaticResource Btn}"/>
+                <Button x:Name="BtnUpdNone" Content="Select none" Style="{StaticResource Btn}"/>
+              </WrapPanel>
+            </DockPanel>
+          </StackPanel>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0"><ItemsControl x:Name="UpdList" ItemTemplate="{StaticResource TweakTemplate}"/></ScrollViewer>
+        </DockPanel>
+      </TabItem>
+
+      <TabItem>
+        <TabItem.Header><StackPanel Orientation="Horizontal">
+          <TextBlock Text="&#xE769;" FontFamily="{StaticResource Icons}" FontSize="16" Width="30" VerticalAlignment="Center"/>
+          <TextBlock Text="Paused Tasks" FontSize="14" VerticalAlignment="Center"/></StackPanel></TabItem.Header>
+        <DockPanel Margin="0,0,14,0">
+          <StackPanel DockPanel.Dock="Top">
+            <TextBlock Text="Paused Tasks" Style="{StaticResource PageTitle}"/>
+            <TextBlock Style="{StaticResource PageSub}"
+                       Text="Apps you paused from the Dashboard. A paused app cannot launch until its timer runs out, or until you lift it here. Pausing uses Image File Execution Options and auto-expires with a scheduled task."/>
+            <WrapPanel>
+              <Button x:Name="BtnPausedRefresh" Style="{StaticResource Btn}">
+                <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE72C;" FontFamily="{StaticResource Icons}" Margin="0,1,8,0"/><TextBlock Text="Refresh"/></StackPanel>
+              </Button>
+              <Button x:Name="BtnResumeAll" Content="Resume all" Style="{StaticResource Btn}"/>
+            </WrapPanel>
+          </StackPanel>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,8,0,0"><StackPanel x:Name="PausedList"/></ScrollViewer>
+        </DockPanel>
+      </TabItem>
+
       <!-- RESTORE -->
       <TabItem>
         <TabItem.Header><StackPanel Orientation="Horizontal">
@@ -1802,6 +2173,10 @@ $xamlRaw = @'
               <Button x:Name="BtnRestorePoint" Content="Create restore point now" Style="{StaticResource Btn}"/>
               <Button x:Name="BtnOpenSysRestore" Content="Open System Restore" Style="{StaticResource Btn}"/>
               <Button x:Name="BtnOpenFolder" Content="Open backup folder" Style="{StaticResource Btn}"/>
+              <Button x:Name="BtnExport" Content="Export preset" Style="{StaticResource Btn}"
+                      ToolTip="Save the currently ticked changes to a .json file you can reapply on another PC."/>
+              <Button x:Name="BtnImport" Content="Import preset" Style="{StaticResource Btn}"
+                      ToolTip="Load a .json preset and tick its changes."/>
             </WrapPanel>
           </StackPanel>
           <ListBox x:Name="BackupList" Background="Transparent" BorderThickness="0" Margin="0,8,0,0" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
@@ -1865,6 +2240,8 @@ foreach ($n in @(
     'BloatList','BloatStatus','BtnBloatRec','BtnBloatNone','BtnBloatRescan',
     'StartList','BtnStartNone','BtnStartReload','CpuList','BtnCpuRec','BtnCpuNone','GpuList','GpuInfo','BtnGpuRec','BtnGpuNone',
     'BackupList','BtnRestore','BtnRestorePoint','BtnOpenSysRestore','BtnOpenFolder',
+    'UiList','UiSearch','BtnUiRec','BtnUiNone','PrivList','PrivSearch','BtnPrivRec','BtnPrivNone',
+    'UpdList','UpdSearch','BtnUpdRec','BtnUpdNone','PausedList','BtnPausedRefresh','BtnResumeAll','BtnExport','BtnImport',
     'LogBox','BusyPanel','BusyText','SelCount','BtnApply')) {
     $ui[$n] = $window.FindName($n)
     if (-not $ui[$n]) { throw "UI element '$n' not found" }
@@ -1883,7 +2260,8 @@ function Set-ListFilter($list, $text) {
 }
 $script:SearchMap = @{}
 foreach ($pair in @(@($ui.MemSearch, $ui.MemList), @($ui.BloatSearch, $ui.BloatList),
-                    @($ui.StartSearch, $ui.StartList), @($ui.CpuSearch, $ui.CpuList), @($ui.GpuSearch, $ui.GpuList))) {
+                    @($ui.StartSearch, $ui.StartList), @($ui.CpuSearch, $ui.CpuList), @($ui.GpuSearch, $ui.GpuList),
+                    @($ui.UiSearch, $ui.UiList), @($ui.PrivSearch, $ui.PrivList), @($ui.UpdSearch, $ui.UpdList))) {
     $script:SearchMap[$pair[0]] = $pair[1]
     $pair[0].add_TextChanged({ param($s, $e) Set-ListFilter $script:SearchMap[$s] $s.Text })
 }
@@ -1994,6 +2372,9 @@ function Load-Catalog {
     $ui.MemList.ItemsSource = @($script:Catalog | Where-Object Category -eq 'Memory')
     $ui.CpuList.ItemsSource = @($script:Catalog | Where-Object Category -eq 'CPU')
     $ui.GpuList.ItemsSource = @($script:Catalog | Where-Object Category -eq 'GPU')
+    $ui.UiList.ItemsSource   = @($script:Catalog | Where-Object Category -eq 'UI')
+    $ui.PrivList.ItemsSource = @($script:Catalog | Where-Object Category -eq 'Privacy')
+    $ui.UpdList.ItemsSource  = @($script:Catalog | Where-Object Category -eq 'Update')
 }
 
 function Load-Startup {
@@ -2082,8 +2463,119 @@ function Update-Stats {
 
 function Update-Processes { [WinOpt.Collector]::RequestProcs() }
 
+# ---------- Presets ----------
+function Export-Preset {
+    $ids = @(Get-AllTweaks | Where-Object { $_.IsSelected } | ForEach-Object { $_.Id })
+    if (-not $ids.Count) { [System.Windows.MessageBox]::Show('Tick some changes first, then export.', 'WinOptimizer') | Out-Null; return }
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Filter = 'WinOptimizer preset (*.json)|*.json'; $dlg.FileName = 'winoptimizer-preset.json'
+    if (-not $dlg.ShowDialog()) { return }
+    @{ Preset = 'WinOptimizer'; Created = (Get-Date).ToString('o'); Ids = $ids } | ConvertTo-Json -Depth 4 | Set-Content -Path $dlg.FileName -Encoding UTF8
+    Write-Log "Preset saved: $($dlg.FileName) ($($ids.Count) items)" 'OK'
+}
+function Import-Preset {
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Filter = 'WinOptimizer preset (*.json)|*.json'
+    if (-not $dlg.ShowDialog()) { return }
+    try { $data = Get-Content $dlg.FileName -Raw | ConvertFrom-Json } catch { Write-Log "Could not read preset: $($_.Exception.Message)" 'ERR'; return }
+    $ids = @($data.Ids); $n = 0
+    foreach ($t in Get-AllTweaks) { if (($ids -contains $t.Id) -and $t.IsAvailable) { $t.IsSelected = $true; $n++ } }
+    Update-SelCount
+    Write-Log "Preset loaded: selected $n of $($ids.Count) items. Review, then Review & apply." 'OK'
+    [System.Windows.MessageBox]::Show("Selected $n of $($ids.Count) items from the preset. Review them, then click Review & apply.", 'WinOptimizer') | Out-Null
+}
+
+# ---------- Process end-task / pause dialog ----------
+function Show-ProcessDialog($row) {
+    if (-not $row) { return }
+    $dx = [xml]@'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Manage process" SizeToContent="Height" Width="460" WindowStartupLocation="CenterOwner"
+        Background="#FFFFFF" Foreground="#1C2A3A" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13" ResizeMode="NoResize">
+  <StackPanel Margin="24,20">
+    <TextBlock x:Name="Ttl" FontSize="20" FontFamily="Segoe UI Semilight, Segoe UI" Foreground="#152235"/>
+    <TextBlock x:Name="Sub" Foreground="#64748B" Margin="0,4,0,16" TextWrapping="Wrap"/>
+    <Button x:Name="End" Style="{DynamicResource PrimaryBtn}" Margin="0,0,0,14" Padding="14,10" HorizontalAlignment="Left">
+      <TextBlock Text="End task now"/></Button>
+    <TextBlock Text="Pause it (block from relaunching) for:" FontWeight="SemiBold" Margin="0,0,0,8"/>
+    <WrapPanel x:Name="Durations"/>
+    <Button x:Name="Cancel" Content="Cancel" Style="{DynamicResource Btn}" HorizontalAlignment="Right" Margin="0,8,0,0" IsCancel="True"/>
+  </StackPanel>
+</Window>
+'@
+    $dlg = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $dx))
+    $dlg.Owner = $window
+    $dlg.Resources.MergedDictionaries.Add($window.Resources)
+    $dlg.FindName('Ttl').Text = $row.Name
+    $dlg.FindName('Sub').Text = "$($row.Count) running instance(s), $($row.MB) MB. Ending stops it now; pausing also stops it and prevents it reopening."
+    $dlg.FindName('End').Add_Click({
+        $k = Stop-AppNow $row.Name
+        Write-Log "Ended $($row.Name): stopped $k instance(s)." 'OK'
+        Update-Processes; $dlg.Close()
+    })
+    $wrap = $dlg.FindName('Durations')
+    $mk = {
+        param($label, $span)
+        $b = New-Object System.Windows.Controls.Button
+        $b.Content = $label; $b.Style = $window.FindResource('Btn')
+        $b.Add_Click({
+            try {
+                $until = $null
+                if ($span) { $until = (Get-Date).Add($span) }
+                Pause-App $row.Name $until
+                Load-PausedTasks
+                Update-Processes
+                $dlg.Close()
+            } catch {
+                [System.Windows.MessageBox]::Show($_.Exception.Message, 'WinOptimizer') | Out-Null
+            }
+        }.GetNewClosure())
+        [void]$wrap.Children.Add($b)
+    }
+    foreach ($key in $PauseDurations.Keys) { & $mk $key $PauseDurations[$key] }
+    & $mk 'Permanently' $null
+    [void]$dlg.ShowDialog()
+}
+
+# ---------- Paused Tasks page ----------
+function Load-PausedTasks {
+    $ui.PausedList.Children.Clear()
+    $items = @(Get-ActivePauses)
+    if (-not $items.Count) {
+        $tb = New-Object System.Windows.Controls.TextBlock
+        $tb.Text = 'No paused apps. Pause one by double-clicking it on the Dashboard.'
+        $tb.Foreground = '#8094AC'; $tb.Margin = New-Object System.Windows.Thickness(2,6,0,0)
+        [void]$ui.PausedList.Children.Add($tb); return
+    }
+    foreach ($it in $items) {
+        $when = 'Permanent'
+        if ($it.Until) { try { $when = 'until ' + ([datetime]$it.Until).ToString('ddd d MMM, HH:mm') } catch {} }
+        $card = New-Object System.Windows.Controls.Border
+        $card.Background = '#FFFFFF'; $card.BorderBrush = '#E4EBF4'
+        $card.BorderThickness = New-Object System.Windows.Thickness(1); $card.CornerRadius = New-Object System.Windows.CornerRadius(10)
+        $card.Padding = New-Object System.Windows.Thickness(16,12,16,12); $card.Margin = New-Object System.Windows.Thickness(0,0,14,8)
+        $g = New-Object System.Windows.Controls.Grid
+        $c0 = New-Object System.Windows.Controls.ColumnDefinition; $c0.Width = 'Auto'
+        $c1 = New-Object System.Windows.Controls.ColumnDefinition
+        $g.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
+        $g.ColumnDefinitions.Add($c0)
+        $sp = New-Object System.Windows.Controls.StackPanel
+        $t1 = New-Object System.Windows.Controls.TextBlock; $t1.Text = $it.Exe; $t1.FontWeight = 'SemiBold'; $t1.FontSize = 14; $t1.Foreground = '#152235'
+        $t2 = New-Object System.Windows.Controls.TextBlock; $t2.Text = "Paused $when"; $t2.Foreground = '#64748B'; $t2.FontSize = 12; $t2.Margin = New-Object System.Windows.Thickness(0,3,0,0)
+        [void]$sp.Children.Add($t1); [void]$sp.Children.Add($t2)
+        [System.Windows.Controls.Grid]::SetColumn($sp,0); [void]$g.Children.Add($sp)
+        $btn = New-Object System.Windows.Controls.Button; $btn.Content = 'Resume now'; $btn.Style = $window.FindResource('Btn'); $btn.Margin = New-Object System.Windows.Thickness(0)
+        $exe = $it.Exe
+        $btn.Add_Click({ Resume-App $exe; Load-PausedTasks }.GetNewClosure())
+        [System.Windows.Controls.Grid]::SetColumn($btn,1); [void]$g.Children.Add($btn)
+        $card.Child = $g
+        [void]$ui.PausedList.Children.Add($card)
+    }
+}
+
 # ---------- Preview / confirm dialog ----------
-$CategoryTitles = [ordered]@{ Memory = 'Memory & RAM settings'; Startup = 'Startup apps to disable'; CPU = 'CPU settings'; GPU = 'GPU settings'; Bloat = 'Apps to UNINSTALL' }
+$CategoryTitles = [ordered]@{ Memory = 'Memory & RAM settings'; UI = 'Explorer & UI'; Privacy = 'Privacy & AI'; Update = 'Windows Update'; Startup = 'Startup apps to disable'; CPU = 'CPU settings'; GPU = 'GPU settings'; Bloat = 'Apps to UNINSTALL' }
 
 function Show-Preview($selected) {
     $sb = New-Object System.Text.StringBuilder
@@ -2344,6 +2836,20 @@ $ui.BtnCpuRec.add_Click({ Set-Selection 'CPU' $true $false })
 $ui.BtnCpuNone.add_Click({ Set-Selection 'CPU' $false $true })
 $ui.BtnGpuRec.add_Click({ Set-Selection 'GPU' $true $false })
 $ui.BtnGpuNone.add_Click({ Set-Selection 'GPU' $false $true })
+$ui.BtnUiRec.add_Click({ Set-Selection 'UI' $true $false })
+$ui.BtnUiNone.add_Click({ Set-Selection 'UI' $false $true })
+$ui.BtnPrivRec.add_Click({ Set-Selection 'Privacy' $true $false })
+$ui.BtnPrivNone.add_Click({ Set-Selection 'Privacy' $false $true })
+$ui.BtnUpdRec.add_Click({ Set-Selection 'Update' $true $false })
+$ui.BtnUpdNone.add_Click({ Set-Selection 'Update' $false $true })
+$ui.BtnExport.add_Click({ Export-Preset })
+$ui.BtnImport.add_Click({ Import-Preset })
+$ui.ProcList.add_MouseDoubleClick({ Show-ProcessDialog $ui.ProcList.SelectedItem })
+$ui.BtnPausedRefresh.add_Click({ Load-PausedTasks })
+$ui.BtnResumeAll.add_Click({
+    foreach ($it in @(Get-ActivePauses)) { Resume-App $it.Exe }
+    Load-PausedTasks
+})
 $ui.BtnBloatRec.add_Click({ Set-Selection 'Bloat' $true $false })
 $ui.BtnBloatNone.add_Click({ Set-Selection 'Bloat' $false $true })
 $ui.BtnBloatRescan.add_Click({ if (-not $script:Busy) { Start-BloatScan } })
@@ -2393,6 +2899,7 @@ $window.add_Loaded({
             Load-Startup
             Load-Backups
             Update-SelCount
+            Load-PausedTasks
             Start-BloatScan
         } catch {
             Write-Log "Startup scan failed: $($_.Exception.Message)" 'ERR'
