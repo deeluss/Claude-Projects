@@ -4,6 +4,22 @@ A GUI tool for Windows 10/11 that turns off background features you don't need, 
 
 > **Antivirus flags this as a virus — is it safe?** Yes. It's an unsigned tool that automates Windows settings, which heuristics mistake for malware. The code is open and readable, nothing is hidden, and nothing is obfuscated to dodge detection. Full explanation: [Why antivirus flags it](#why-antivirus-flags-it-and-why-thats-expected).
 
+## Made for beginners
+
+Most debloat tools are scripts you run in a black terminal window, firing off dozens of changes at once with names only a power user understands. WinOptimizer is built so someone who has never touched the registry can use it safely:
+
+- **It's a real app, not a command line.** A clean window with clearly labelled pages — no commands to type, no scripts to read first.
+- **Plain-English explanations.** Every option says what it does *and* what you give up, in one sentence. No jargon required.
+- **Colour-coded risk.** Green **Safe**, amber **Moderate**, red **Advanced** badges tell you at a glance how cautious to be. Safe options are ticked for you; risky ones never are.
+- **One button for the nervous.** **Quick optimize** applies only the safe, recommended settings — tick nothing, click once, done.
+- **Nothing happens by surprise.** Clicking *Review & apply* shows you the exact list of changes (old value → new value) *before* anything is touched. You can still back out.
+- **One-click undo.** Every change is saved to a backup; the **Backup & Restore** page puts things back exactly as they were. A System Restore point is offered too. Removed apps come with a direct link to reinstall them.
+- **Familiar numbers.** The dashboard shows RAM and CPU the same way Task Manager does, so you're not learning a new dashboard.
+- **Search everywhere.** Long lists have a search box, so you can find "dark mode" or "Copilot" without scrolling.
+
+In short: you can click **Quick optimize** and be done, or explore every toggle knowing each one is explained, labelled by risk, previewed before it runs, and reversible.
+
+
 ## How to run
 
 Two ways, depending on what you care about more.
